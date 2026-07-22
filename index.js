@@ -1,26 +1,9 @@
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
-const LOG_FILE = path.join(__dirname, 'sessions.json');
 
-function getSessions() {
-    if (!fs.existsSync(LOG_FILE)) return [];
-    try {
-        const data = fs.readFileSync(LOG_FILE, 'utf8');
-        return JSON.parse(data || '[]');
-    } catch (e) {
-        return [];
-    }
-}
-
-function saveSessions(data) {
-    try {
-        fs.writeFileSync(LOG_FILE, JSON.stringify(data, null, 2));
-    } catch (e) {}
-}
+// In-Memory Storage (Fastest Response - No Disk Lag)
+let sessions = [];
 
 function formatDuration(seconds) {
     const hrs = Math.floor(seconds / 3600);
@@ -33,20 +16,17 @@ function formatDuration(seconds) {
     return res;
 }
 
+// Tracking API
 app.get(['/', '/index.php'], (req, res) => {
     const deviceId = req.query.id;
     const action = req.query.action;
-
-    let sessions = getSessions();
     const nowTimestamp = Date.now();
     const nowReadable = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-    // Tracking API Hit
     if (deviceId) {
         let activeSession = sessions.find(s => s.device_id === deviceId && s.status === 'online');
 
         if (action === 'start' || !activeSession) {
-            // New Session Create Karo
             if (activeSession) activeSession.status = 'offline';
             sessions.unshift({
                 device_id: deviceId,
@@ -57,23 +37,20 @@ app.get(['/', '/index.php'], (req, res) => {
                 status: 'online'
             });
         } else {
-            // Existing Active Session Update
             activeSession.last_seen = nowReadable;
             activeSession.last_timestamp = nowTimestamp;
             activeSession.duration += 10;
         }
 
-        saveSessions(sessions);
-        return res.send('SUCCESS');
+        return res.status(200).send('SUCCESS');
     }
 
-    // Dashboard View - Mark Inactive as Offline (> 30s)
+    // Auto Offline Calculation (> 25 seconds)
     sessions.forEach(s => {
-        if (s.status === 'online' && (nowTimestamp - s.last_timestamp > 30000)) {
+        if (s.status === 'online' && (nowTimestamp - s.last_timestamp > 25000)) {
             s.status = 'offline';
         }
     });
-    saveSessions(sessions);
 
     const rows = sessions.map(s => `
         <tr>
@@ -85,14 +62,13 @@ app.get(['/', '/index.php'], (req, res) => {
         </tr>
     `).join('');
 
-    res.send(`
+    const html = `
     <!DOCTYPE html>
     <html>
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta http-equiv="refresh" content="5">
-        <title>App Tracker Dashboard</title>
+        <title>App Session Tracker</title>
         <style>
             * { box-sizing: border-box; font-family: system-ui, sans-serif; margin: 0; padding: 0; }
             body { background-color: #121212; color: #fff; padding: 20px; }
@@ -105,11 +81,24 @@ app.get(['/', '/index.php'], (req, res) => {
             .badge { padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: bold; }
             .online { background: rgba(0, 230, 118, 0.2); color: #00e676; border: 1px solid #00e676; }
             .offline { background: rgba(255, 82, 82, 0.2); color: #ff5252; border: 1px solid #ff5252; }
+            .btn { background-color: #00e676; color: #121212; border: none; padding: 8px 16px; border-radius: 6px; font-weight: bold; cursor: pointer; float: right; margin-bottom: 15px; }
         </style>
+        <script>
+            // JavaScript Auto-Fetch without Freeze
+            setInterval(() => {
+                fetch(location.href)
+                    .then(res => res.text())
+                    .then(html => {
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(html, 'text/html');
+                        document.querySelector('tbody').innerHTML = doc.querySelector('tbody').innerHTML;
+                    }).catch(() => {});
+            }, 3000);
+        </script>
     </head>
     <body>
         <div class="container">
-            <h1>App Tracking Sessions</h1>
+            <h1>Live App Sessions Dashboard</h1>
             <div class="card">
                 <table>
                     <thead>
@@ -122,14 +111,16 @@ app.get(['/', '/index.php'], (req, res) => {
                         </tr>
                     </thead>
                     <tbody>
-                        ${rows || '<tr><td colspan="5" style="text-align:center; color:#888;">No tracking records yet. Open the app to see logs.</td></tr>'}
+                        ${rows || '<tr><td colspan="5" style="text-align:center; color:#888;">No tracking records yet. Open the app.</td></tr>'}
                     </tbody>
                 </table>
             </div>
         </div>
     </body>
     </html>
-    `);
+    `;
+
+    res.send(html);
 });
 
 app.listen(PORT, () => console.log(`Server live on ${PORT}`));
