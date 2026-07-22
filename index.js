@@ -4,7 +4,7 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const LOG_FILE = path.join(__dirname, 'log_data.json');
+const LOG_FILE = path.join(__dirname, 'sessions_log.json'); // Nayi file taaki purana glitch khatam ho
 
 if (!fs.existsSync(LOG_FILE)) {
     fs.writeFileSync(LOG_FILE, JSON.stringify([]));
@@ -24,8 +24,7 @@ function formatDuration(seconds) {
 
 app.get(['/', '/index.php'], (req, res) => {
     const deviceId = req.query.id;
-    const status = req.query.status;
-    const duration = parseInt(req.query.duration || '15', 10);
+    const action = req.query.action; // 'start' ya 'ping'
 
     let sessions = [];
     try {
@@ -38,43 +37,50 @@ app.get(['/', '/index.php'], (req, res) => {
     const nowTimestamp = Date.now();
     const nowReadable = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-    // Handle Ping Requests from App
     if (deviceId) {
-        // Search for active/recent session for this device (within last 35 seconds)
-        let activeSession = sessions.find(s => s.device_id === deviceId && (nowTimestamp - s.last_timestamp) <= 35000);
-
-        if (activeSession) {
-            // Update existing session
-            activeSession.last_seen = nowReadable;
-            activeSession.last_timestamp = nowTimestamp;
-            activeSession.duration += duration;
-            activeSession.status = 'online';
-        } else {
-            // Create a NEW session (New App Launch)
+        if (action === 'start') {
+            // Naya session turant add karo jab bhi app khule
             sessions.unshift({
-                id: Date.now().toString(),
+                session_id: nowTimestamp.toString(),
                 device_id: deviceId,
                 start_time: nowReadable,
                 last_seen: nowReadable,
                 last_timestamp: nowTimestamp,
-                duration: duration,
+                duration: 0,
                 status: 'online'
             });
+        } else {
+            // Heartbeat ping jo chal raha hai
+            let activeSession = sessions.find(s => s.device_id === deviceId && s.status === 'online');
+            if (activeSession) {
+                activeSession.last_seen = nowReadable;
+                activeSession.last_timestamp = nowTimestamp;
+                activeSession.duration += 10; // har 10 sec ping
+            } else {
+                // Agar session nahi mila toh naya bana do
+                sessions.unshift({
+                    session_id: nowTimestamp.toString(),
+                    device_id: deviceId,
+                    start_time: nowReadable,
+                    last_seen: nowReadable,
+                    last_timestamp: nowTimestamp,
+                    duration: 10,
+                    status: 'online'
+                });
+            }
         }
 
         fs.writeFileSync(LOG_FILE, JSON.stringify(sessions, null, 2));
         return res.send('SUCCESS');
     }
 
-    // Process sessions for Dashboard display & mark inactive ones as OFFLINE
+    // Dashboard check: Agar 25 seconds se ping nahi aaya toh OFFLINE mark karo
     sessions.forEach(s => {
-        // Agar last ping ko 35 seconds se zyada ho gaye, toh OFFLINE mark kar do
-        if (nowTimestamp - s.last_timestamp > 35000) {
+        if (s.status === 'online' && (nowTimestamp - s.last_timestamp > 25000)) {
             s.status = 'offline';
         }
     });
 
-    // Save status updates
     fs.writeFileSync(LOG_FILE, JSON.stringify(sessions, null, 2));
 
     const rows = sessions.map(s => `
@@ -93,7 +99,7 @@ app.get(['/', '/index.php'], (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta http-equiv="refresh" content="10"> <!-- Auto refresh dashboard every 10s -->
+        <meta http-equiv="refresh" content="5"> <!-- Har 5 second me auto refresh -->
         <title>Admin Session Dashboard</title>
         <style>
             * { box-sizing: border-box; font-family: system-ui, sans-serif; margin: 0; padding: 0; }
@@ -113,7 +119,7 @@ app.get(['/', '/index.php'], (req, res) => {
     </head>
     <body>
         <div class="container">
-            <div class="header"><h1>Admin Session History Dashboard</h1></div>
+            <div class="header"><h1>Multiple Sessions Log Dashboard</h1></div>
             <button class="btn" onclick="location.reload()">Refresh Data</button>
             <div class="card">
                 <table>
@@ -121,13 +127,13 @@ app.get(['/', '/index.php'], (req, res) => {
                         <tr>
                             <th>Device ID</th>
                             <th>Status</th>
-                            <th>Session Start</th>
+                            <th>Session Start Time</th>
                             <th>Last Seen</th>
-                            <th>Session Duration</th>
+                            <th>Duration</th>
                         </tr>
                     </thead>
                     <tbody>
-                        ${rows || '<tr><td colspan="5" style="text-align:center; color:#888;">No sessions recorded.</td></tr>'}
+                        ${rows || '<tr><td colspan="5" style="text-align:center; color:#888;">No session records found.</td></tr>'}
                     </tbody>
                 </table>
             </div>
