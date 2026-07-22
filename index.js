@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 3000;
 const LOG_FILE = path.join(__dirname, 'log_data.json');
 
 if (!fs.existsSync(LOG_FILE)) {
-    fs.writeFileSync(LOG_FILE, JSON.stringify({}));
+    fs.writeFileSync(LOG_FILE, JSON.stringify([]));
 }
 
 function formatDuration(seconds) {
@@ -25,49 +25,67 @@ function formatDuration(seconds) {
 app.get(['/', '/index.php'], (req, res) => {
     const deviceId = req.query.id;
     const status = req.query.status;
-    const duration = parseInt(req.query.duration || '0', 10);
+    const duration = parseInt(req.query.duration || '15', 10);
 
-    let logs = {};
+    let sessions = [];
     try {
-        logs = JSON.parse(fs.readFileSync(LOG_FILE, 'utf8'));
+        sessions = JSON.parse(fs.readFileSync(LOG_FILE, 'utf8'));
+        if (!Array.isArray(sessions)) sessions = [];
     } catch (e) {
-        logs = {};
+        sessions = [];
     }
 
     const nowTimestamp = Date.now();
     const nowReadable = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-    // Handle Tracking Hits
-    if (deviceId && status) {
-        const previousDuration = logs[deviceId]?.total_seconds || 0;
+    // Handle Ping Requests from App
+    if (deviceId) {
+        // Search for active/recent session for this device (within last 35 seconds)
+        let activeSession = sessions.find(s => s.device_id === deviceId && (nowTimestamp - s.last_timestamp) <= 35000);
 
-        logs[deviceId] = {
-            device_id: deviceId,
-            status: status, // online / offline from app
-            last_seen: nowReadable,
-            last_timestamp: nowTimestamp,
-            total_seconds: previousDuration + duration
-        };
+        if (activeSession) {
+            // Update existing session
+            activeSession.last_seen = nowReadable;
+            activeSession.last_timestamp = nowTimestamp;
+            activeSession.duration += duration;
+            activeSession.status = 'online';
+        } else {
+            // Create a NEW session (New App Launch)
+            sessions.unshift({
+                id: Date.now().toString(),
+                device_id: deviceId,
+                start_time: nowReadable,
+                last_seen: nowReadable,
+                last_timestamp: nowTimestamp,
+                duration: duration,
+                status: 'online'
+            });
+        }
 
-        fs.writeFileSync(LOG_FILE, JSON.stringify(logs, null, 2));
+        fs.writeFileSync(LOG_FILE, JSON.stringify(sessions, null, 2));
         return res.send('SUCCESS');
     }
 
-    // Render Dashboard & Auto-Detect Offline Status
-    const rows = Object.values(logs).map(user => {
-        // Agar 2 minutes (120000 ms) se zyada time ho gaya request aaye, toh automatic OFFLINE kar do
-        const isExpired = user.last_timestamp && (nowTimestamp - user.last_timestamp > 120000);
-        const displayStatus = isExpired ? 'offline' : user.status;
+    // Process sessions for Dashboard display & mark inactive ones as OFFLINE
+    sessions.forEach(s => {
+        // Agar last ping ko 35 seconds se zyada ho gaye, toh OFFLINE mark kar do
+        if (nowTimestamp - s.last_timestamp > 35000) {
+            s.status = 'offline';
+        }
+    });
 
-        return `
-            <tr>
-                <td><code>${user.device_id}</code></td>
-                <td><span class="badge ${displayStatus}">${displayStatus.toUpperCase()}</span></td>
-                <td>${user.last_seen}</td>
-                <td><strong>${formatDuration(user.total_seconds)}</strong></td>
-            </tr>
-        `;
-    }).join('');
+    // Save status updates
+    fs.writeFileSync(LOG_FILE, JSON.stringify(sessions, null, 2));
+
+    const rows = sessions.map(s => `
+        <tr>
+            <td><code>${s.device_id}</code></td>
+            <td><span class="badge ${s.status}">${s.status.toUpperCase()}</span></td>
+            <td>${s.start_time}</td>
+            <td>${s.last_seen}</td>
+            <td><strong>${formatDuration(s.duration)}</strong></td>
+        </tr>
+    `).join('');
 
     const html = `
     <!DOCTYPE html>
@@ -75,17 +93,18 @@ app.get(['/', '/index.php'], (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="refresh" content="10"> <!-- Auto refresh dashboard every 10s -->
         <title>Admin Session Dashboard</title>
         <style>
             * { box-sizing: border-box; font-family: system-ui, sans-serif; margin: 0; padding: 0; }
             body { background-color: #121212; color: #ffffff; padding: 20px; }
-            .container { max-width: 900px; margin: 0 auto; }
+            .container { max-width: 1000px; margin: 0 auto; }
             .header { text-align: center; margin-bottom: 20px; }
             .header h1 { color: #00e676; font-size: 24px; }
             .card { background-color: #1e1e1e; border-radius: 12px; padding: 15px; overflow-x: auto; }
             table { width: 100%; border-collapse: collapse; text-align: left; }
             th, td { padding: 12px 15px; border-bottom: 1px solid #2c2c2c; }
-            th { background-color: #272727; color: #00e676; font-size: 13px; text-transform: uppercase; }
+            th { background-color: #272727; color: #00e676; font-size: 12px; text-transform: uppercase; }
             .badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: bold; }
             .online { background-color: rgba(0, 230, 118, 0.2); color: #00e676; border: 1px solid #00e676; }
             .offline { background-color: rgba(255, 82, 82, 0.2); color: #ff5252; border: 1px solid #ff5252; }
@@ -94,7 +113,7 @@ app.get(['/', '/index.php'], (req, res) => {
     </head>
     <body>
         <div class="container">
-            <div class="header"><h1>Admin Session Dashboard</h1></div>
+            <div class="header"><h1>Admin Session History Dashboard</h1></div>
             <button class="btn" onclick="location.reload()">Refresh Data</button>
             <div class="card">
                 <table>
@@ -102,12 +121,13 @@ app.get(['/', '/index.php'], (req, res) => {
                         <tr>
                             <th>Device ID</th>
                             <th>Status</th>
+                            <th>Session Start</th>
                             <th>Last Seen</th>
-                            <th>Total Usage</th>
+                            <th>Session Duration</th>
                         </tr>
                     </thead>
                     <tbody>
-                        ${rows || '<tr><td colspan="4" style="text-align:center; color:#888;">No active records found.</td></tr>'}
+                        ${rows || '<tr><td colspan="5" style="text-align:center; color:#888;">No sessions recorded.</td></tr>'}
                     </tbody>
                 </table>
             </div>
