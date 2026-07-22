@@ -2,7 +2,7 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// In-Memory Storage (Fastest Response - No Disk Lag)
+// In-Memory Storage (Zero Disk Latency - Server Freeze Fix)
 let sessions = [];
 
 function formatDuration(seconds) {
@@ -16,19 +16,21 @@ function formatDuration(seconds) {
     return res;
 }
 
-// Tracking API
+// Session API Endpoint
 app.get(['/', '/index.php'], (req, res) => {
     const deviceId = req.query.id;
     const action = req.query.action;
     const nowTimestamp = Date.now();
     const nowReadable = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
+    // Handle App Hits
     if (deviceId) {
         let activeSession = sessions.find(s => s.device_id === deviceId && s.status === 'online');
 
         if (action === 'start' || !activeSession) {
             if (activeSession) activeSession.status = 'offline';
             sessions.unshift({
+                session_id: nowTimestamp.toString(),
                 device_id: deviceId,
                 start_time: nowReadable,
                 last_seen: nowReadable,
@@ -45,7 +47,7 @@ app.get(['/', '/index.php'], (req, res) => {
         return res.status(200).send('SUCCESS');
     }
 
-    // Auto Offline Calculation (> 25 seconds)
+    // Mark Inactive Sessions as Offline (> 25s)
     sessions.forEach(s => {
         if (s.status === 'online' && (nowTimestamp - s.last_timestamp > 25000)) {
             s.status = 'offline';
@@ -62,35 +64,33 @@ app.get(['/', '/index.php'], (req, res) => {
         </tr>
     `).join('');
 
-    const html = `
+    res.send(`
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>App Session Tracker</title>
+        <title>App Live Tracking Dashboard</title>
         <style>
-            * { box-sizing: border-box; font-family: system-ui, sans-serif; margin: 0; padding: 0; }
-            body { background-color: #121212; color: #fff; padding: 20px; }
-            .container { max-width: 950px; margin: 0 auto; }
-            h1 { color: #00e676; text-align: center; margin-bottom: 20px; font-size: 22px; }
-            .card { background-color: #1e1e1e; border-radius: 10px; padding: 15px; overflow-x: auto; }
+            * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 0; }
+            body { background-color: #0f172a; color: #f8fafc; padding: 24px; }
+            .container { max-width: 900px; margin: 0 auto; }
+            h1 { color: #38bdf8; text-align: center; margin-bottom: 24px; font-size: 22px; }
+            .card { background-color: #1e293b; border-radius: 12px; padding: 16px; overflow-x: auto; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3); }
             table { width: 100%; border-collapse: collapse; text-align: left; }
-            th, td { padding: 12px; border-bottom: 1px solid #2d2d2d; font-size: 14px; }
-            th { color: #00e676; background-color: #252525; }
-            .badge { padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: bold; }
-            .online { background: rgba(0, 230, 118, 0.2); color: #00e676; border: 1px solid #00e676; }
-            .offline { background: rgba(255, 82, 82, 0.2); color: #ff5252; border: 1px solid #ff5252; }
-            .btn { background-color: #00e676; color: #121212; border: none; padding: 8px 16px; border-radius: 6px; font-weight: bold; cursor: pointer; float: right; margin-bottom: 15px; }
+            th, td { padding: 12px 16px; border-bottom: 1px solid #334155; font-size: 14px; }
+            th { color: #38bdf8; background-color: #0f172a; font-weight: 600; text-transform: uppercase; font-size: 12px; }
+            .badge { padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; }
+            .online { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid #22c55e; }
+            .offline { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; }
         </style>
         <script>
-            // JavaScript Auto-Fetch without Freeze
+            // Silent Live DOM Refresh without Browser Freeze
             setInterval(() => {
                 fetch(location.href)
-                    .then(res => res.text())
+                    .then(r => r.text())
                     .then(html => {
-                        const parser = new DOMParser();
-                        const doc = parser.parseFromString(html, 'text/html');
+                        const doc = new DOMParser().parseFromString(html, 'text/html');
                         document.querySelector('tbody').innerHTML = doc.querySelector('tbody').innerHTML;
                     }).catch(() => {});
             }, 3000);
@@ -98,7 +98,7 @@ app.get(['/', '/index.php'], (req, res) => {
     </head>
     <body>
         <div class="container">
-            <h1>Live App Sessions Dashboard</h1>
+            <h1>Live Session Tracking Dashboard</h1>
             <div class="card">
                 <table>
                     <thead>
@@ -111,16 +111,14 @@ app.get(['/', '/index.php'], (req, res) => {
                         </tr>
                     </thead>
                     <tbody>
-                        ${rows || '<tr><td colspan="5" style="text-align:center; color:#888;">No tracking records yet. Open the app.</td></tr>'}
+                        ${rows || '<tr><td colspan="5" style="text-align:center; color:#94a3b8;">No active or past sessions found. Open the app to view telemetry.</td></tr>'}
                     </tbody>
                 </table>
             </div>
         </div>
     </body>
     </html>
-    `;
-
-    res.send(html);
+    `);
 });
 
-app.listen(PORT, () => console.log(`Server live on ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
