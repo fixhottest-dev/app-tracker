@@ -6,12 +6,10 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const LOG_FILE = path.join(__dirname, 'log_data.json');
 
-// Initialize JSON log file if it doesn't exist
 if (!fs.existsSync(LOG_FILE)) {
     fs.writeFileSync(LOG_FILE, JSON.stringify({}));
 }
 
-// Helper to format seconds into readable time
 function formatDuration(seconds) {
     const hrs = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
@@ -24,36 +22,11 @@ function formatDuration(seconds) {
     return result;
 }
 
-// Handle Tracking API Requests (compatible with existing query params)
 app.get(['/', '/index.php'], (req, res) => {
     const deviceId = req.query.id;
     const status = req.query.status;
     const duration = parseInt(req.query.duration || '0', 10);
 
-    // If request contains tracking parameters, save log data
-    if (deviceId && status) {
-        let logs = {};
-        try {
-            logs = JSON.parse(fs.readFileSync(LOG_FILE, 'utf8'));
-        } catch (e) {
-            logs = {};
-        }
-
-        const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
-        const previousDuration = logs[deviceId]?.total_seconds || 0;
-
-        logs[deviceId] = {
-            device_id: deviceId,
-            status: status,
-            last_seen: now,
-            total_seconds: previousDuration + duration
-        };
-
-        fs.writeFileSync(LOG_FILE, JSON.stringify(logs, null, 2));
-        return res.send('SUCCESS');
-    }
-
-    // Render Admin Dashboard HTML view if accessed directly via browser
     let logs = {};
     try {
         logs = JSON.parse(fs.readFileSync(LOG_FILE, 'utf8'));
@@ -61,14 +34,40 @@ app.get(['/', '/index.php'], (req, res) => {
         logs = {};
     }
 
-    const rows = Object.values(logs).map(user => `
-        <tr>
-            <td><code>${user.device_id}</code></td>
-            <td><span class="badge ${user.status}">${user.status.toUpperCase()}</span></td>
-            <td>${user.last_seen}</td>
-            <td><strong>${formatDuration(user.total_seconds)}</strong></td>
-        </tr>
-    `).join('');
+    const nowTimestamp = Date.now();
+    const nowReadable = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+
+    // Handle Tracking Hits
+    if (deviceId && status) {
+        const previousDuration = logs[deviceId]?.total_seconds || 0;
+
+        logs[deviceId] = {
+            device_id: deviceId,
+            status: status, // online / offline from app
+            last_seen: nowReadable,
+            last_timestamp: nowTimestamp,
+            total_seconds: previousDuration + duration
+        };
+
+        fs.writeFileSync(LOG_FILE, JSON.stringify(logs, null, 2));
+        return res.send('SUCCESS');
+    }
+
+    // Render Dashboard & Auto-Detect Offline Status
+    const rows = Object.values(logs).map(user => {
+        // Agar 2 minutes (120000 ms) se zyada time ho gaya request aaye, toh automatic OFFLINE kar do
+        const isExpired = user.last_timestamp && (nowTimestamp - user.last_timestamp > 120000);
+        const displayStatus = isExpired ? 'offline' : user.status;
+
+        return `
+            <tr>
+                <td><code>${user.device_id}</code></td>
+                <td><span class="badge ${displayStatus}">${displayStatus.toUpperCase()}</span></td>
+                <td>${user.last_seen}</td>
+                <td><strong>${formatDuration(user.total_seconds)}</strong></td>
+            </tr>
+        `;
+    }).join('');
 
     const html = `
     <!DOCTYPE html>
@@ -76,7 +75,7 @@ app.get(['/', '/index.php'], (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>User Session Dashboard</title>
+        <title>Admin Session Dashboard</title>
         <style>
             * { box-sizing: border-box; font-family: system-ui, sans-serif; margin: 0; padding: 0; }
             body { background-color: #121212; color: #ffffff; padding: 20px; }
