@@ -2,67 +2,65 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// In-Memory Storage (Zero Disk Latency - Server Freeze Fix)
-let sessions = [];
+// Memory storage for active sessions
+const devices = new Map();
 
-function formatDuration(seconds) {
-    const hrs = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-    let res = '';
-    if (hrs > 0) res += `${hrs}h `;
-    if (mins > 0) res += `${mins}m `;
-    res += `${secs}s`;
-    return res;
+// Time formatter helper
+function formatTime(ms) {
+    const totalSecs = Math.floor(ms / 1000);
+    const mins = Math.floor(totalSecs / 60);
+    const secs = totalSecs % 60;
+    return `${mins}m ${secs}s`;
 }
 
-// Session API Endpoint
-app.get(['/', '/index.php'], (req, res) => {
+// 1. Tracking Endpoint (App hit karegi)
+app.get(['/', '/index.php', '/track'], (req, res) => {
     const deviceId = req.query.id;
-    const action = req.query.action;
-    const nowTimestamp = Date.now();
-    const nowReadable = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    const now = Date.now();
 
-    // Handle App Hits
     if (deviceId) {
-        let activeSession = sessions.find(s => s.device_id === deviceId && s.status === 'online');
-
-        if (action === 'start' || !activeSession) {
-            if (activeSession) activeSession.status = 'offline';
-            sessions.unshift({
-                session_id: nowTimestamp.toString(),
-                device_id: deviceId,
-                start_time: nowReadable,
-                last_seen: nowReadable,
-                last_timestamp: nowTimestamp,
-                duration: 10,
+        let device = devices.get(deviceId);
+        if (!device) {
+            // New Session
+            device = {
+                id: deviceId,
+                startTime: now,
+                lastSeen: now,
                 status: 'online'
-            });
+            };
         } else {
-            activeSession.last_seen = nowReadable;
-            activeSession.last_timestamp = nowTimestamp;
-            activeSession.duration += 10;
+            // Update Existing Session
+            device.lastSeen = now;
+            device.status = 'online';
         }
-
-        return res.status(200).send('SUCCESS');
+        devices.set(deviceId, device);
+        return res.status(200).send('OK');
     }
 
-    // Mark Inactive Sessions as Offline (> 25s)
-    sessions.forEach(s => {
-        if (s.status === 'online' && (nowTimestamp - s.last_timestamp > 25000)) {
-            s.status = 'offline';
-        }
-    });
+    // 2. Dashboard Rendering (Browser ke liye)
+    let rowsHtml = '';
+    const currentTime = Date.now();
 
-    const rows = sessions.map(s => `
-        <tr>
-            <td><code>${s.device_id}</code></td>
-            <td><span class="badge ${s.status}">${s.status.toUpperCase()}</span></td>
-            <td>${s.start_time}</td>
-            <td>${s.last_seen}</td>
-            <td><strong>${formatDuration(s.duration)}</strong></td>
-        </tr>
-    `).join('');
+    devices.forEach((dev) => {
+        // Agar 25 seconds tak ping nahi aaya, toh OFFLINE mark karo
+        if (currentTime - dev.lastSeen > 25000) {
+            dev.status = 'offline';
+        }
+
+        const duration = formatTime(dev.lastSeen - dev.startTime);
+        const startReadable = new Date(dev.startTime).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+        const lastSeenReadable = new Date(dev.lastSeen).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+
+        rowsHtml += `
+            <tr>
+                <td><code>${dev.id}</code></td>
+                <td><span class="badge ${dev.status}">${dev.status.toUpperCase()}</span></td>
+                <td>${startReadable}</td>
+                <td>${lastSeenReadable}</td>
+                <td><strong>${duration}</strong></td>
+            </tr>
+        `;
+    });
 
     res.send(`
     <!DOCTYPE html>
@@ -70,35 +68,36 @@ app.get(['/', '/index.php'], (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>App Live Tracking Dashboard</title>
+        <title>App Tracking Dashboard</title>
         <style>
-            * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 0; }
-            body { background-color: #0f172a; color: #f8fafc; padding: 24px; }
+            * { box-sizing: border-box; font-family: sans-serif; margin: 0; padding: 0; }
+            body { background: #0f172a; color: #e2e8f0; padding: 20px; }
             .container { max-width: 900px; margin: 0 auto; }
-            h1 { color: #38bdf8; text-align: center; margin-bottom: 24px; font-size: 22px; }
-            .card { background-color: #1e293b; border-radius: 12px; padding: 16px; overflow-x: auto; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3); }
+            h1 { color: #38bdf8; text-align: center; margin-bottom: 20px; }
+            .card { background: #1e293b; border-radius: 10px; padding: 15px; overflow-x: auto; }
             table { width: 100%; border-collapse: collapse; text-align: left; }
-            th, td { padding: 12px 16px; border-bottom: 1px solid #334155; font-size: 14px; }
-            th { color: #38bdf8; background-color: #0f172a; font-weight: 600; text-transform: uppercase; font-size: 12px; }
-            .badge { padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; }
-            .online { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid #22c55e; }
-            .offline { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; }
+            th, td { padding: 12px; border-bottom: 1px solid #334155; font-size: 14px; }
+            th { color: #38bdf8; background: #0f172a; }
+            .badge { padding: 4px 8px; border-radius: 6px; font-size: 12px; font-weight: bold; }
+            .online { background: #166534; color: #4ade80; }
+            .offline { background: #991b1b; color: #f87171; }
         </style>
         <script>
-            // Silent Live DOM Refresh without Browser Freeze
+            // Silent Live Auto Update (No Refresh Freeze)
             setInterval(() => {
                 fetch(location.href)
                     .then(r => r.text())
                     .then(html => {
                         const doc = new DOMParser().parseFromString(html, 'text/html');
-                        document.querySelector('tbody').innerHTML = doc.querySelector('tbody').innerHTML;
+                        const newTbody = doc.querySelector('tbody');
+                        if (newTbody) document.querySelector('tbody').innerHTML = newTbody.innerHTML;
                     }).catch(() => {});
             }, 3000);
         </script>
     </head>
     <body>
         <div class="container">
-            <h1>Live Session Tracking Dashboard</h1>
+            <h1>Live App Telemetry Dashboard</h1>
             <div class="card">
                 <table>
                     <thead>
@@ -107,11 +106,11 @@ app.get(['/', '/index.php'], (req, res) => {
                             <th>Status</th>
                             <th>Session Start</th>
                             <th>Last Seen</th>
-                            <th>Duration</th>
+                            <th>Active Duration</th>
                         </tr>
                     </thead>
                     <tbody>
-                        ${rows || '<tr><td colspan="5" style="text-align:center; color:#94a3b8;">No active or past sessions found. Open the app to view telemetry.</td></tr>'}
+                        ${rowsHtml || '<tr><td colspan="5" style="text-align:center; color:#94a3b8;">No devices online. Open the app to view logs.</td></tr>'}
                     </tbody>
                 </table>
             </div>
@@ -121,4 +120,4 @@ app.get(['/', '/index.php'], (req, res) => {
     `);
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server live on port ${PORT}`));
