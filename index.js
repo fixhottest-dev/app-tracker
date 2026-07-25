@@ -3,16 +3,20 @@ const mongoose = require('mongoose');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 1. Apna MongoDB Connection String Yahan Lagayein
-const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://<username>:<password>@cluster0.mongodb.net/app_tracker?retryWrites=true&w=majority";
+// 1. Environment Variable for MongoDB Connection
+const MONGO_URI = process.env.MONGO_URI;
 
-mongoose.connect(MONGO_URI)
-    .then(() => console.log("MongoDB Connected Successfully"))
-    .catch(err => console.error("Mongo DB Connection Error:", err));
+if (!MONGO_URI) {
+    console.error("CRITICAL ERROR: MONGO_URI environment variable is not set!");
+} else {
+    mongoose.connect(MONGO_URI)
+        .then(() => console.log("MongoDB Connected Successfully"))
+        .catch(err => console.error("Mongo DB Connection Error:", err));
+}
 
-// 2. Session Data Schema
+// 2. Session Schema
 const SessionSchema = new mongoose.Schema({
-    deviceId: String,
+    deviceId: { type: String, required: true },
     startTime: String,
     lastSeenTime: String,
     startTimestamp: Number,
@@ -35,15 +39,16 @@ function formatDuration(ms) {
 }
 
 app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
-// Tracking API Route
+// Tracking Endpoint
 app.get(['/', '/index.php', '/track'], async (req, res) => {
     const deviceId = req.query.id;
     const action = req.query.action;
     const now = Date.now();
     const timeFormatted = new Date(now).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-    // App se Hit Aane Par
+    // App Signal Handler
     if (deviceId) {
         try {
             let currentSession = await Session.findOne({ deviceId: deviceId, status: 'online' });
@@ -68,16 +73,16 @@ app.get(['/', '/index.php', '/track'], async (req, res) => {
                 await currentSession.save();
             }
         } catch (e) {
-            console.error(e);
+            console.error("Tracking Error:", e);
         }
         return res.status(200).send('OK');
     }
 
-    // Dashboard Fetching
+    // Dashboard View
     try {
         let allSessions = await Session.find().sort({ startTimestamp: -1 });
 
-        // Update inactive sessions to offline (>25 seconds)
+        // Update inactive pings (>25s)
         for (let s of allSessions) {
             if (s.status === 'online' && (now - s.lastSeenTimestamp > 25000)) {
                 s.status = 'offline';
@@ -94,7 +99,12 @@ app.get(['/', '/index.php', '/track'], async (req, res) => {
                     <td>${s.startTime}</td>
                     <td>${s.lastSeenTime}</td>
                     <td><strong>${duration}</strong></td>
-                    <td><a href="/delete?id=${s._id}" class="del-btn" onclick="return confirm('Is history record ko delete karein?')">Delete</a></td>
+                    <td>
+                        <form method="POST" action="/delete" style="display:inline;">
+                            <input type="hidden" name="id" value="${s._id}">
+                            <button type="submit" class="del-btn" onclick="return confirm('Delete this session?')">Delete</button>
+                        </form>
+                    </td>
                 </tr>
             `;
         }).join('');
@@ -105,7 +115,7 @@ app.get(['/', '/index.php', '/track'], async (req, res) => {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Permanent Session Tracking</title>
+            <title>Session Telemetry Dashboard</title>
             <style>
                 * { box-sizing: border-box; font-family: system-ui, sans-serif; margin: 0; padding: 0; }
                 body { background: #0f172a; color: #e2e8f0; padding: 20px; }
@@ -119,12 +129,11 @@ app.get(['/', '/index.php', '/track'], async (req, res) => {
                 .badge { padding: 4px 8px; border-radius: 6px; font-size: 10px; font-weight: bold; }
                 .online { background: #166534; color: #4ade80; }
                 .offline { background: #991b1b; color: #f87171; }
-                .clear-btn { background: #ef4444; color: #fff; padding: 8px 14px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 12px; }
-                .del-btn { color: #f87171; text-decoration: none; font-size: 12px; font-weight: bold; }
+                .clear-btn { background: #ef4444; color: #fff; padding: 8px 14px; border: none; border-radius: 6px; font-weight: bold; font-size: 12px; cursor: pointer; }
+                .del-btn { background: none; border: none; color: #f87171; font-size: 12px; font-weight: bold; cursor: pointer; }
                 .del-btn:hover { text-decoration: underline; }
             </style>
             <script>
-                // Auto Refresh UI
                 setInterval(() => {
                     fetch(location.href)
                         .then(r => r.text())
@@ -139,8 +148,10 @@ app.get(['/', '/index.php', '/track'], async (req, res) => {
         <body>
             <div class="container">
                 <div class="header">
-                    <h1>Live Session History (Permanent Storage)</h1>
-                    <a href="/clear-all" class="clear-btn" onclick="return confirm('Kya aap SARI HISTORY DELETE karna chahte hain?')">Clear All History</a>
+                    <h1>Session History Dashboard</h1>
+                    <form method="POST" action="/clear-all">
+                        <button type="submit" class="clear-btn" onclick="return confirm('Clear ALL history records?')">Clear All History</button>
+                    </form>
                 </div>
                 <div class="card">
                     <table>
@@ -164,22 +175,30 @@ app.get(['/', '/index.php', '/track'], async (req, res) => {
         </html>
         `);
     } catch (err) {
+        console.error("Dashboard Load Error:", err);
         res.status(500).send("Database Error");
     }
 });
 
-// Delete Single Record
-app.get('/delete', async (req, res) => {
-    const id = req.query.id;
+// Secure Deletion Endpoints (POST)
+app.post('/delete', async (req, res) => {
+    const { id } = req.body;
     if (id) {
-        await Session.findByIdAndDelete(id);
+        try {
+            await Session.findByIdAndDelete(id);
+        } catch (e) {
+            console.error("Delete Error:", e);
+        }
     }
     res.redirect('/');
 });
 
-// Delete All History
-app.get('/clear-all', async (req, res) => {
-    await Session.deleteMany({});
+app.post('/clear-all', async (req, res) => {
+    try {
+        await Session.deleteMany({});
+    } catch (e) {
+        console.error("Clear All Error:", e);
+    }
     res.redirect('/');
 });
 
