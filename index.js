@@ -1,11 +1,11 @@
-const express = require('express');
-const mongoose = require('mongoose');
+const express = require("express");
+const mongoose = require("mongoose");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 const REDIRECT_URL =
-    'https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app';
+  "https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app";
 
 const MONGO_URI = process.env.MONGO_URI;
 
@@ -16,18 +16,6 @@ app.use(express.json());
    DATABASE
 ========================= */
 
-if (!MONGO_URI) {
-    console.error('CRITICAL: MONGO_URI is not configured');
-} else {
-    mongoose.connect(MONGO_URI)
-        .then(() => console.log('MongoDB connected'))
-        .catch(err => console.error('MongoDB connection error:', err));
-}
-
-/* =========================
-   DEVICE
-========================= */
-
 const DeviceSchema = new mongoose.Schema({
     deviceId: {
         type: String,
@@ -35,23 +23,16 @@ const DeviceSchema = new mongoose.Schema({
         unique: true,
         index: true
     },
-
     status: {
         type: String,
-        enum: ['pending', 'approved', 'blocked'],
-        default: 'pending'
+        enum: ["pending", "approved", "blocked"],
+        default: "pending"
     },
-
     registeredAt: {
-        type: String
+        type: Date,
+        default: Date.now
     }
 });
-
-const Device = mongoose.model('Device', DeviceSchema);
-
-/* =========================
-   SESSION
-========================= */
 
 const SessionSchema = new mongoose.Schema({
     deviceId: {
@@ -59,36 +40,48 @@ const SessionSchema = new mongoose.Schema({
         required: true,
         index: true
     },
-
-    startTime: String,
-    lastSeenTime: String,
-    endTime: String,
-
+    startTime: Date,
+    lastSeenTime: Date,
     startTimestamp: Number,
     lastSeenTimestamp: Number,
-    endTimestamp: Number,
-
     status: {
         type: String,
-        enum: ['online', 'offline'],
-        default: 'online'
+        enum: ["online", "offline"],
+        default: "online"
     }
 });
 
-const Session = mongoose.model('Session', SessionSchema);
+const Device = mongoose.model("Device", DeviceSchema);
+const Session = mongoose.model("Session", SessionSchema);
+
+mongoose.connection.on("connected", () => {
+    console.log("MongoDB CONNECTED");
+});
+
+mongoose.connection.on("error", err => {
+    console.error("MongoDB ERROR:", err.message);
+});
+
+mongoose.connection.on("disconnected", () => {
+    console.log("MongoDB DISCONNECTED");
+});
+
+if (!MONGO_URI) {
+    console.error("MONGO_URI IS MISSING");
+} else {
+    mongoose.connect(MONGO_URI, {
+        serverSelectionTimeoutMS: 10000
+    }).catch(err => {
+        console.error("MongoDB CONNECTION FAILED:", err.message);
+    });
+}
 
 /* =========================
    HELPERS
 ========================= */
 
-function getIndiaTime(timestamp = Date.now()) {
-    return new Date(timestamp).toLocaleString('en-IN', {
-        timeZone: 'Asia/Kolkata'
-    });
-}
-
 function formatDuration(ms) {
-    if (!ms || ms < 0) return '0s';
+    if (!Number.isFinite(ms) || ms < 0) return "0s";
 
     const totalSeconds = Math.floor(ms / 1000);
 
@@ -96,383 +89,255 @@ function formatDuration(ms) {
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
 
-    let result = '';
+    let result = "";
 
-    if (hours) result += `${hours}h `;
-    if (minutes) result += `${minutes}m `;
+    if (hours > 0) result += `${hours}h `;
+    if (minutes > 0) result += `${minutes}m `;
 
     result += `${seconds}s`;
 
     return result;
 }
 
+async function markInactiveSessions() {
+    const cutoff = Date.now() - 25000;
+
+    await Session.updateMany(
+        {
+            status: "online",
+            lastSeenTimestamp: { $lt: cutoff }
+        },
+        {
+            $set: { status: "offline" }
+        }
+    );
+}
+
 /* =========================
-   DEVICE / SESSION API
+   HEALTH
 ========================= */
 
-app.get(['/','/index.php','/track'], async (req, res) => {
+app.get("/health", (req, res) => {
+    res.json({
+        server: "ok",
+        mongo: mongoose.connection.readyState === 1
+            ? "connected"
+            : "not_connected"
+    });
+});
 
-    const deviceId = String(req.query.id || '').trim();
-    const action = String(req.query.action || 'start').trim();
+/* =========================
+   APP AUTH / TRACKING
+========================= */
+
+app.get(["/index.php", "/track"], async (req, res) => {
+
+    const deviceId = String(req.query.id || "").trim();
+    const action = String(req.query.action || "start").trim();
 
     if (!deviceId) {
         return res.status(400).json({
-            status: 'ERROR',
-            message: 'Missing device ID'
+            status: "ERROR",
+            message: "Missing device ID"
         });
     }
 
-    const now = Date.now();
-    const time = getIndiaTime(now);
-
     try {
-
-        /* -------------------------
-           FIND / REGISTER DEVICE
-        ------------------------- */
 
         let device = await Device.findOne({ deviceId });
 
+        /* New device */
         if (!device) {
+
             device = await Device.create({
                 deviceId,
-                status: 'pending',
-                registeredAt: time
+                status: "pending",
+                registeredAt: new Date()
             });
-        }
-
-        /* -------------------------
-           BLOCK UNAPPROVED DEVICE
-        ------------------------- */
-
-        if (device.status !== 'approved') {
 
             return res.status(200).json({
-                status: 'BLOCKED',
+                status: "BLOCKED",
+                deviceStatus: "pending",
                 redirectUrl: REDIRECT_URL
             });
         }
 
-        /* -------------------------
+        /* Not approved */
+        if (device.status !== "approved") {
+
+            /*
+             * Close any existing online session if
+             * admin blocks the device.
+             */
+            await Session.updateMany(
+                {
+                    deviceId,
+                    status: "online"
+                },
+                {
+                    $set: {
+                        status: "offline"
+                    }
+                }
+            );
+
+            return res.status(200).json({
+                status: "BLOCKED",
+                deviceStatus: device.status,
+                redirectUrl: REDIRECT_URL
+            });
+        }
+
+        /* =========================
            APPROVED DEVICE
-        ------------------------- */
+        ========================= */
+
+        const now = Date.now();
 
         let session = await Session.findOne({
             deviceId,
-            status: 'online'
-        }).sort({
-            startTimestamp: -1
-        });
+            status: "online"
+        }).sort({ startTimestamp: -1 });
 
-        /* START */
+        if (action === "start" || !session) {
 
-        if (action === 'start') {
-
-            // Close an old online session if one exists
             if (session) {
-                session.status = 'offline';
-                session.endTimestamp = now;
-                session.endTime = time;
-
+                session.status = "offline";
                 await session.save();
             }
 
             session = await Session.create({
                 deviceId,
-                startTime: time,
-                lastSeenTime: time,
+                startTime: new Date(now),
+                lastSeenTime: new Date(now),
                 startTimestamp: now,
                 lastSeenTimestamp: now,
-                status: 'online'
+                status: "online"
             });
 
-            return res.status(200).json({
-                status: 'ALLOWED',
-                action: 'start'
-            });
+        } else {
+
+            session.lastSeenTimestamp = now;
+            session.lastSeenTime = new Date(now);
+
+            await session.save();
         }
 
-        /* PING */
-
-        if (action === 'ping') {
-
-            if (!session) {
-
-                session = await Session.create({
-                    deviceId,
-                    startTime: time,
-                    lastSeenTime: time,
-                    startTimestamp: now,
-                    lastSeenTimestamp: now,
-                    status: 'online'
-                });
-
-            } else {
-
-                session.lastSeenTimestamp = now;
-                session.lastSeenTime = time;
-
-                await session.save();
-            }
-
-            return res.status(200).json({
-                status: 'ALLOWED',
-                action: 'ping'
-            });
-        }
-
-        /* STOP */
-
-        if (action === 'stop') {
-
-            if (session) {
-
-                session.status = 'offline';
-                session.endTimestamp = now;
-                session.endTime = time;
-                session.lastSeenTimestamp = now;
-                session.lastSeenTime = time;
-
-                await session.save();
-            }
-
-            return res.status(200).json({
-                status: 'ALLOWED',
-                action: 'stop'
-            });
-        }
-
-        /* UNKNOWN ACTION */
-
-        return res.status(400).json({
-            status: 'ERROR',
-            message: 'Unknown action'
+        return res.status(200).json({
+            status: "ALLOWED",
+            deviceStatus: "approved"
         });
 
-    } catch (error) {
+    } catch (err) {
 
-        console.error('Tracking error:', error);
+        console.error("TRACKING ERROR:", err);
 
         return res.status(500).json({
-            status: 'ERROR',
-            message: 'Server error'
+            status: "ERROR"
         });
     }
-});
-
-/* =========================
-   AUTOMATIC OFFLINE CHECK
-========================= */
-
-setInterval(async () => {
-
-    try {
-
-        const now = Date.now();
-        const timeout = 25000;
-
-        const sessions = await Session.find({
-            status: 'online'
-        });
-
-        for (const session of sessions) {
-
-            if (
-                session.lastSeenTimestamp &&
-                now - session.lastSeenTimestamp > timeout
-            ) {
-
-                session.status = 'offline';
-                session.endTimestamp = session.lastSeenTimestamp;
-                session.endTime = session.lastSeenTime;
-
-                await session.save();
-
-                console.log(
-                    `Device offline: ${session.deviceId}`
-                );
-            }
-        }
-
-    } catch (error) {
-
-        console.error('Offline checker error:', error);
-    }
-
-}, 10000);
-
-/* =========================
-   APPROVE / BLOCK DEVICE
-========================= */
-
-app.post('/toggle-device', async (req, res) => {
-
-    const deviceId = String(req.body.deviceId || '').trim();
-
-    if (!deviceId) {
-        return res.redirect('/');
-    }
-
-    try {
-
-        const device = await Device.findOne({ deviceId });
-
-        if (device) {
-
-            device.status =
-                device.status === 'approved'
-                    ? 'blocked'
-                    : 'approved';
-
-            await device.save();
-
-            /* If blocked while online,
-               close active sessions */
-
-            if (device.status === 'blocked') {
-
-                const now = Date.now();
-                const time = getIndiaTime(now);
-
-                await Session.updateMany(
-                    {
-                        deviceId,
-                        status: 'online'
-                    },
-                    {
-                        $set: {
-                            status: 'offline',
-                            endTimestamp: now,
-                            endTime: time
-                        }
-                    }
-                );
-            }
-        }
-
-    } catch (error) {
-
-        console.error('Toggle error:', error);
-    }
-
-    res.redirect('/');
-});
-
-/* =========================
-   DELETE SESSION
-========================= */
-
-app.post('/delete', async (req, res) => {
-
-    const id = req.body.id;
-
-    if (id) {
-
-        try {
-            await Session.findByIdAndDelete(id);
-        } catch (error) {
-            console.error('Delete error:', error);
-        }
-    }
-
-    res.redirect('/');
-});
-
-/* =========================
-   CLEAR HISTORY
-========================= */
-
-app.post('/clear-all', async (req, res) => {
-
-    try {
-
-        await Session.deleteMany({});
-
-    } catch (error) {
-
-        console.error('Clear error:', error);
-    }
-
-    res.redirect('/');
 });
 
 /* =========================
    DASHBOARD
 ========================= */
 
-app.get('/dashboard', async (req, res) => {
+app.get("/", async (req, res) => {
 
     try {
 
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).send(`
+                <h1>Server OK</h1>
+                <p>MongoDB is not connected.</p>
+            `);
+        }
+
+        await markInactiveSessions();
+
         const devices = await Device
             .find()
-            .sort({ _id: -1 });
+            .sort({ registeredAt: -1 })
+            .lean();
 
         const sessions = await Session
             .find()
-            .sort({ startTimestamp: -1 });
+            .sort({ startTimestamp: -1 })
+            .lean();
 
-        const deviceRows = devices.map(device => {
+        const deviceRows = devices.map(d => {
 
-            const approved = device.status === 'approved';
+            const approved = d.status === "approved";
 
             return `
                 <tr>
-                    <td><code>${device.deviceId}</code></td>
+                    <td>
+                        <code>${escapeHtml(d.deviceId)}</code>
+                    </td>
 
                     <td>
-                        <span class="badge ${approved ? 'online' : 'offline'}">
-                            ${device.status.toUpperCase()}
+                        <span class="badge ${approved ? "approved" : "blocked"}">
+                            ${escapeHtml(d.status.toUpperCase())}
                         </span>
                     </td>
 
-                    <td>${device.registeredAt || '-'}</td>
+                    <td>
+                        ${new Date(d.registeredAt).toLocaleString("en-IN", {
+                            timeZone: "Asia/Kolkata"
+                        })}
+                    </td>
 
                     <td>
                         <form method="POST" action="/toggle-device">
                             <input
                                 type="hidden"
                                 name="deviceId"
-                                value="${device.deviceId}"
+                                value="${escapeHtml(d.deviceId)}"
                             >
 
-                            <button class="action-btn ${approved ? 'block-btn' : 'approve-btn'}">
-                                ${approved ? 'Block Access' : 'Approve Device'}
+                            <button
+                                class="btn ${approved ? "block" : "approve"}"
+                                type="submit"
+                            >
+                                ${approved ? "Block Device" : "Approve Device"}
                             </button>
                         </form>
                     </td>
                 </tr>
             `;
-        }).join('');
+        }).join("");
 
-        const sessionRows = sessions.map(session => {
+        const sessionRows = sessions.map(s => {
 
-            const end =
-                session.endTimestamp ||
-                session.lastSeenTimestamp ||
-                session.startTimestamp;
-
-            const duration =
-                formatDuration(end - session.startTimestamp);
+            const duration = formatDuration(
+                (s.lastSeenTimestamp || s.startTimestamp) -
+                s.startTimestamp
+            );
 
             return `
                 <tr>
 
                     <td>
-                        <code>${session.deviceId}</code>
+                        <code>${escapeHtml(s.deviceId)}</code>
                     </td>
 
                     <td>
-                        <span class="badge ${session.status}">
-                            ${session.status.toUpperCase()}
+                        <span class="badge ${s.status}">
+                            ${escapeHtml(s.status.toUpperCase())}
                         </span>
                     </td>
 
-                    <td>${session.startTime || '-'}</td>
+                    <td>
+                        ${new Date(s.startTime).toLocaleString("en-IN", {
+                            timeZone: "Asia/Kolkata"
+                        })}
+                    </td>
 
-                    <td>${session.lastSeenTime || '-'}</td>
-
-                    <td>${session.endTime || '-'}</td>
+                    <td>
+                        ${new Date(s.lastSeenTime).toLocaleString("en-IN", {
+                            timeZone: "Asia/Kolkata"
+                        })}
+                    </td>
 
                     <td>
                         <strong>${duration}</strong>
@@ -483,10 +348,10 @@ app.get('/dashboard', async (req, res) => {
                             <input
                                 type="hidden"
                                 name="id"
-                                value="${session._id}"
+                                value="${escapeHtml(String(s._id))}"
                             >
 
-                            <button class="del-btn">
+                            <button class="delete" type="submit">
                                 Delete
                             </button>
                         </form>
@@ -494,7 +359,7 @@ app.get('/dashboard', async (req, res) => {
 
                 </tr>
             `;
-        }).join('');
+        }).join("");
 
         res.send(`
 <!DOCTYPE html>
@@ -502,103 +367,117 @@ app.get('/dashboard', async (req, res) => {
 <head>
 
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
->
-
-<title>Device Control</title>
+<title>Device Control Panel</title>
 
 <style>
 
+* {
+    box-sizing: border-box;
+    font-family: system-ui, sans-serif;
+}
+
 body {
-    background:#0f172a;
-    color:#e2e8f0;
-    font-family:system-ui;
-    padding:20px;
+    margin: 0;
+    padding: 20px;
+    background: #0f172a;
+    color: #e2e8f0;
 }
 
 .container {
-    max-width:1200px;
-    margin:auto;
+    max-width: 1100px;
+    margin: auto;
 }
 
-.card {
-    background:#1e293b;
-    padding:15px;
-    border-radius:10px;
-    margin-bottom:25px;
-    overflow:auto;
-}
-
-h1,h2 {
-    color:#38bdf8;
+h1, h2 {
+    color: #38bdf8;
 }
 
 h2 {
-    margin:20px 0 10px;
+    margin-top: 30px;
+}
+
+.card {
+    margin-top: 12px;
+    background: #1e293b;
+    padding: 15px;
+    border-radius: 10px;
+    overflow-x: auto;
 }
 
 table {
-    width:100%;
-    border-collapse:collapse;
+    width: 100%;
+    border-collapse: collapse;
 }
 
-th,td {
-    padding:10px;
-    border-bottom:1px solid #334155;
-    text-align:left;
-    white-space:nowrap;
+th, td {
+    padding: 12px;
+    border-bottom: 1px solid #334155;
+    text-align: left;
+    font-size: 13px;
 }
 
 th {
-    color:#38bdf8;
+    color: #38bdf8;
+    background: #0f172a;
 }
 
 .badge {
-    padding:4px 8px;
-    border-radius:5px;
-    font-size:10px;
-    font-weight:bold;
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 10px;
+    font-weight: bold;
 }
 
+.approved,
 .online {
-    background:#166534;
-    color:#4ade80;
+    background: #14532d;
+    color: #4ade80;
 }
 
+.blocked,
+.pending,
 .offline {
-    background:#991b1b;
-    color:#f87171;
+    background: #7f1d1d;
+    color: #f87171;
 }
 
-.action-btn {
-    border:0;
-    padding:6px 12px;
-    border-radius:5px;
-    font-weight:bold;
-    cursor:pointer;
+.btn {
+    border: 0;
+    border-radius: 6px;
+    padding: 7px 12px;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
 }
 
-.approve-btn {
-    background:#16a34a;
-    color:white;
+.approve {
+    background: #16a34a;
 }
 
-.block-btn {
-    background:#ea580c;
-    color:white;
+.block {
+    background: #ea580c;
 }
 
-.del-btn {
-    background:none;
-    border:0;
-    color:#f87171;
-    cursor:pointer;
+.delete {
+    border: 0;
+    background: transparent;
+    color: #f87171;
+    cursor: pointer;
+    font-weight: bold;
 }
 
 </style>
+
+<script>
+
+setInterval(() => {
+    location.reload();
+}, 5000);
+
+</script>
 
 </head>
 
@@ -625,8 +504,11 @@ th {
 
 <tbody>
 
-${deviceRows ||
-'<tr><td colspan="4">No devices</td></tr>'}
+${deviceRows || `
+<tr>
+<td colspan="4">No devices registered.</td>
+</tr>
+`}
 
 </tbody>
 
@@ -642,11 +524,10 @@ ${deviceRows ||
 
 <thead>
 <tr>
-<th>Device</th>
+<th>Device ID</th>
 <th>Status</th>
 <th>Start</th>
 <th>Last Seen</th>
-<th>End</th>
 <th>Duration</th>
 <th>Action</th>
 </tr>
@@ -654,8 +535,11 @@ ${deviceRows ||
 
 <tbody>
 
-${sessionRows ||
-'<tr><td colspan="7">No sessions</td></tr>'}
+${sessionRows || `
+<tr>
+<td colspan="6">No sessions.</td>
+</tr>
+`}
 
 </tbody>
 
@@ -663,30 +547,142 @@ ${sessionRows ||
 
 </div>
 
+<div style="margin-top:20px">
+
+<form method="POST" action="/clear-all">
+
+<button
+class="btn block"
+type="submit"
+onclick="return confirm('Delete all sessions?')"
+>
+Clear All History
+</button>
+
+</form>
+
 </div>
 
-<script>
-
-setTimeout(() => {
-    location.reload();
-}, 5000);
-
-</script>
+</div>
 
 </body>
 </html>
         `);
 
-    } catch (error) {
+    } catch (err) {
 
-        console.error('Dashboard error:', error);
+        console.error("DASHBOARD ERROR:", err);
 
-        res.status(500).send('Database Error');
+        res.status(500).send(
+            "Dashboard Error: " + escapeHtml(err.message)
+        );
     }
 });
 
 /* =========================
-   SERVER
+   APPROVE / BLOCK
+========================= */
+
+app.post("/toggle-device", async (req, res) => {
+
+    const deviceId = String(req.body.deviceId || "").trim();
+
+    if (!deviceId) {
+        return res.redirect("/");
+    }
+
+    try {
+
+        const device = await Device.findOne({ deviceId });
+
+        if (device) {
+
+            device.status =
+                device.status === "approved"
+                    ? "blocked"
+                    : "approved";
+
+            await device.save();
+
+            /* If blocked, terminate online session */
+            if (device.status === "blocked") {
+
+                await Session.updateMany(
+                    {
+                        deviceId,
+                        status: "online"
+                    },
+                    {
+                        $set: {
+                            status: "offline"
+                        }
+                    }
+                );
+            }
+        }
+
+    } catch (err) {
+
+        console.error("TOGGLE ERROR:", err);
+    }
+
+    res.redirect("/");
+});
+
+/* =========================
+   DELETE SESSION
+========================= */
+
+app.post("/delete", async (req, res) => {
+
+    const id = String(req.body.id || "").trim();
+
+    if (id) {
+
+        try {
+            await Session.findByIdAndDelete(id);
+        } catch (err) {
+            console.error("DELETE ERROR:", err);
+        }
+    }
+
+    res.redirect("/");
+});
+
+/* =========================
+   CLEAR HISTORY
+========================= */
+
+app.post("/clear-all", async (req, res) => {
+
+    try {
+
+        await Session.deleteMany({});
+
+    } catch (err) {
+
+        console.error("CLEAR ERROR:", err);
+    }
+
+    res.redirect("/");
+});
+
+/* =========================
+   HTML ESCAPE
+========================= */
+
+function escapeHtml(value) {
+
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+/* =========================
+   START SERVER
 ========================= */
 
 app.listen(PORT, () => {
