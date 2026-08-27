@@ -10,7 +10,7 @@ const REDIRECT_URL =
 const MONGO_URI = process.env.MONGO_URI;
 
 app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use(express.json()); // JSON parsing zaroori hai naye buttons ke liye
 
 /* =========================
    DATABASE
@@ -59,11 +59,10 @@ function formatDuration(ms) {
     return result;
 }
 
-// Ye function purane "Invalid Date" issue ko theek karega
 function safeDate(val) {
     if (!val) return "N/A";
     const d = new Date(val);
-    if (isNaN(d.getTime())) return String(val); // Agar purana string format hai toh waise hi dikha do
+    if (isNaN(d.getTime())) return String(val);
     return d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 }
 
@@ -140,6 +139,7 @@ app.get("/", async (req, res) => {
         const devices = await Device.find().sort({ registeredAt: -1 }).lean();
         const sessions = await Session.find().sort({ startTimestamp: -1 }).lean();
 
+        // FORMS HATA DIYE HAIN, DIRECT ONCLICK FUNCTION LAGAYA HAI
         const deviceRows = devices.map(d => {
             const approved = d.status === "approved";
             return `
@@ -148,12 +148,9 @@ app.get("/", async (req, res) => {
                     <td><span class="badge ${approved ? "approved" : "blocked"}">${escapeHtml(d.status.toUpperCase())}</span></td>
                     <td>${safeDate(d.registeredAt)}</td>
                     <td>
-                        <form method="POST" action="/toggle-device" style="margin:0;">
-                            <input type="hidden" name="deviceId" value="${escapeHtml(d.deviceId)}">
-                            <button class="btn ${approved ? "block" : "approve"}" type="submit">
-                                ${approved ? "Block Device" : "Approve Device"}
-                            </button>
-                        </form>
+                        <button class="btn ${approved ? "block" : "approve"}" onclick="toggleDevice('${escapeHtml(d.deviceId)}')">
+                            ${approved ? "Block Device" : "Approve Device"}
+                        </button>
                     </td>
                 </tr>
             `;
@@ -169,10 +166,7 @@ app.get("/", async (req, res) => {
                     <td>${safeDate(s.lastSeenTime)}</td>
                     <td><strong>${duration}</strong></td>
                     <td>
-                        <form method="POST" action="/delete" style="margin:0;">
-                            <input type="hidden" name="id" value="${escapeHtml(String(s._id))}">
-                            <button class="delete" type="submit">Delete</button>
-                        </form>
+                        <button class="delete" onclick="deleteSession('${escapeHtml(String(s._id))}')">Delete</button>
                     </td>
                 </tr>
             `;
@@ -203,9 +197,22 @@ th { color: #38bdf8; background: #0f172a; }
 .delete { border: 0; background: transparent; color: #f87171; cursor: pointer; font-weight: bold; }
 </style>
 <script>
-// Smart refresh: Sirf table update hogi, poora page load nahi hoga, jisse button work karega!
+// NAYA JAVASCRIPT: Bina page form submit kiye direct background se backend ko command bhejega
+function doAction(url, data) {
+    fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+    }).then(() => window.location.reload());
+}
+
+function toggleDevice(id) { doAction('/toggle-device', { deviceId: id }); }
+function deleteSession(id) { if(confirm('Delete this session?')) doAction('/delete', { id: id }); }
+function clearAll() { if(confirm('Delete ALL history?')) doAction('/clear-all', {}); }
+
+// CACHE BUSTING ADDED: Ab browser purana data nahi dikhayega!
 setInterval(() => {
-    fetch(location.href)
+    fetch(location.href, { cache: "no-store" })
         .then(r => r.text())
         .then(html => {
             const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -236,9 +243,9 @@ setInterval(() => {
 <tbody>${sessionRows || `<tr><td colspan="6">No sessions.</td></tr>`}</tbody>
 </table>
 </div>
-<form method="POST" action="/clear-all" style="margin-top:20px;">
-<button class="btn block" type="submit" onclick="return confirm('Delete all history?')">Clear All History</button>
-</form>
+<div style="margin-top:20px;">
+    <button class="btn block" onclick="clearAll()">Clear All History</button>
+</div>
 </div>
 </body>
 </html>
@@ -250,7 +257,7 @@ setInterval(() => {
 });
 
 /* =========================
-   ACTIONS
+   ACTIONS (AJAX READY)
 ========================= */
 
 app.post("/toggle-device", async (req, res) => {
@@ -267,7 +274,7 @@ app.post("/toggle-device", async (req, res) => {
             }
         } catch (err) {}
     }
-    res.redirect("/");
+    res.json({ success: true });
 });
 
 app.post("/delete", async (req, res) => {
@@ -275,12 +282,12 @@ app.post("/delete", async (req, res) => {
     if (id) {
         try { await Session.findByIdAndDelete(id); } catch (err) {}
     }
-    res.redirect("/");
+    res.json({ success: true });
 });
 
 app.post("/clear-all", async (req, res) => {
     try { await Session.deleteMany({}); } catch (err) {}
-    res.redirect("/");
+    res.json({ success: true });
 });
 
 function escapeHtml(value) {
