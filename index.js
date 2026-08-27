@@ -7,37 +7,15 @@ const PORT = process.env.PORT || 3000;
 const REDIRECT_URL = "https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app";
 const MONGO_URI = process.env.MONGO_URI;
 
-// 🔒 ADMIN CREDENTIALS (Ise apne hisaab se change kar lein)
-const ADMIN_USER = "admin";
-const ADMIN_PASS = "12345";
-
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+// Anti-Cache Header taaki hamesha fresh data dikhe
 app.use((req, res, next) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
     next();
-});
-
-/* =========================
-   SECURITY MIDDLEWARE (Lock Dashboard)
-========================= */
-app.use((req, res, next) => {
-    // App tracking ko password free rakhein
-    if (req.path === "/index.php" || req.path === "/track") return next();
-
-    // Baaki sab (Dashboard & Actions) ke liye password mangein
-    const b64auth = (req.headers.authorization || '').split(' ')[1] || '';
-    const [login, password] = Buffer.from(b64auth, 'base64').toString().split(':');
-
-    if (login === ADMIN_USER && password === ADMIN_PASS) {
-        return next();
-    }
-
-    res.set('WWW-Authenticate', 'Basic realm="Admin Panel"');
-    res.status(401).send('Authentication required. Enter Username and Password.');
 });
 
 /* =========================
@@ -97,7 +75,7 @@ function escapeHtml(value) {
 }
 
 /* =========================
-   TRACKING ENDPOINT (Public for App)
+   TRACKING ENDPOINT
 ========================= */
 app.get(["/index.php", "/track"], async (req, res) => {
     const deviceId = String(req.query.id || "").trim();
@@ -143,8 +121,10 @@ app.get(["/index.php", "/track"], async (req, res) => {
 });
 
 /* =========================
-   ADMIN ACTIONS (Protected)
+   PURE HTML FORM ACTIONS (100% WORKING)
 ========================= */
+
+// 1. APPROVE / BLOCK DEVICE
 app.post("/toggle-device", async (req, res) => {
     const deviceId = String(req.body.deviceId || "").trim();
     if (deviceId) {
@@ -162,6 +142,20 @@ app.post("/toggle-device", async (req, res) => {
     res.redirect("/");
 });
 
+// 2. DELETE DEVICE (NAYA OPTION)
+app.post("/delete-device", async (req, res) => {
+    const deviceId = String(req.body.deviceId || "").trim();
+    if (deviceId) {
+        try {
+            await Device.findOneAndDelete({ deviceId });
+            // Device delete hone par uske saare sessions bhi mita do
+            await Session.deleteMany({ deviceId });
+        } catch (err) { console.error(err); }
+    }
+    res.redirect("/");
+});
+
+// 3. DELETE SESSION
 app.post("/delete-session", async (req, res) => {
     const id = String(req.body.id || "").trim();
     if (id) {
@@ -170,13 +164,14 @@ app.post("/delete-session", async (req, res) => {
     res.redirect("/");
 });
 
+// 4. CLEAR ALL SESSIONS
 app.post("/clear-all", async (req, res) => {
     try { await Session.deleteMany({}); } catch (err) {}
     res.redirect("/");
 });
 
 /* =========================
-   DASHBOARD UI (Protected)
+   COMPACT & CLEAN DASHBOARD
 ========================= */
 app.get("/", async (req, res) => {
     try {
@@ -193,11 +188,17 @@ app.get("/", async (req, res) => {
                     <td><code>${escapeHtml(d.deviceId)}</code></td>
                     <td><span class="badge ${approved ? "approved" : "blocked"}">${escapeHtml(d.status.toUpperCase())}</span></td>
                     <td>${safeDate(d.registeredAt)}</td>
-                    <td>
+                    <td class="action-cell">
                         <form method="POST" action="/toggle-device" style="margin:0;">
                             <input type="hidden" name="deviceId" value="${escapeHtml(d.deviceId)}">
                             <button type="submit" class="btn ${approved ? "block" : "approve"}">
                                 ${approved ? "🛑 Block" : "✅ Approve"}
+                            </button>
+                        </form>
+                        <form method="POST" action="/delete-device" style="margin:0;">
+                            <input type="hidden" name="deviceId" value="${escapeHtml(d.deviceId)}">
+                            <button type="submit" class="btn delete-btn" onclick="return confirm('Delete this device permanently?')">
+                                🗑️ Delete
                             </button>
                         </form>
                     </td>
@@ -216,7 +217,7 @@ app.get("/", async (req, res) => {
                     <td>
                         <form method="POST" action="/delete-session" style="margin:0;">
                             <input type="hidden" name="id" value="${escapeHtml(String(s._id))}">
-                            <button type="submit" class="delete" onclick="return confirm('Delete this record?')">🗑️ Delete</button>
+                            <button type="submit" class="btn delete-btn" onclick="return confirm('Delete this record?')">🗑️ Delete</button>
                         </form>
                     </td>
                 </tr>`;
@@ -235,21 +236,23 @@ body { margin: 0; padding: 15px; background: #0f172a; color: #e2e8f0; }
 .container { max-width: 1000px; margin: auto; }
 .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 h1 { color: #38bdf8; font-size: 20px; margin: 0; }
-h2 { color: #38bdf8; font-size: 15px; margin: 25px 0 10px 0; }
+h2 { color: #38bdf8; font-size: 16px; margin: 25px 0 10px 0; border-bottom: 1px solid #334155; padding-bottom: 5px; }
 .card { background: #1e293b; padding: 10px; border-radius: 8px; overflow-x: auto; margin-bottom: 15px; }
-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
-th, td { padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 13px; }
+/* Table ki styling fix kar di hai taaki buttons dabe nahi */
+table { width: 100%; border-collapse: collapse; min-width: 600px; }
+th, td { padding: 12px 10px; border-bottom: 1px solid #334155; text-align: left; font-size: 13px; }
 th { background: #0f172a; font-weight: bold; }
-.badge { display: inline-block; padding: 4px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
+.action-cell { display: flex; gap: 8px; align-items: center; border: none; }
+.badge { display: inline-block; padding: 5px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
 .approved, .online { background: #14532d; color: #4ade80; }
 .blocked, .pending, .offline { background: #7f1d1d; color: #f87171; }
 .btn { border: 0; border-radius: 4px; padding: 8px 12px; color: white; font-weight: bold; cursor: pointer; font-size: 12px; }
 .approve { background: #16a34a; }
 .block { background: #ea580c; }
-.delete { border: 0; background: transparent; color: #f87171; cursor: pointer; font-weight: bold; font-size: 12px; }
+.delete-btn { background: #dc2626; }
 .clear-btn { background: #b91c1c; }
 .refresh-btn { background: #3b82f6; }
-code { background: #0f172a; padding: 3px 6px; border-radius: 4px; color: #94a3b8; font-size: 12px; }
+code { background: #0f172a; padding: 4px 8px; border-radius: 4px; color: #94a3b8; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -263,7 +266,7 @@ code { background: #0f172a; padding: 3px 6px; border-radius: 4px; color: #94a3b8
     <div class="card">
         <table>
             <thead><tr><th>Device ID</th><th>Status</th><th>Registered</th><th>Action</th></tr></thead>
-            <tbody>${deviceRows || `<tr><td colspan="4">No devices.</td></tr>`}</tbody>
+            <tbody>${deviceRows || `<tr><td colspan="4" style="text-align:center;">No devices.</td></tr>`}</tbody>
         </table>
     </div>
 
@@ -271,13 +274,13 @@ code { background: #0f172a; padding: 3px 6px; border-radius: 4px; color: #94a3b8
     <div class="card">
         <table>
             <thead><tr><th>Device ID</th><th>Status</th><th>Start</th><th>Last Seen</th><th>Duration</th><th>Action</th></tr></thead>
-            <tbody>${sessionRows || `<tr><td colspan="6">No sessions.</td></tr>`}</tbody>
+            <tbody>${sessionRows || `<tr><td colspan="6" style="text-align:center;">No sessions.</td></tr>`}</tbody>
         </table>
     </div>
     
     <div style="margin-top:20px;">
         <form method="POST" action="/clear-all">
-            <button type="submit" class="btn clear-btn" onclick="return confirm('Clear ALL?')">🗑️ Clear All History</button>
+            <button type="submit" class="btn clear-btn" onclick="return confirm('Clear ALL sessions?')">🗑️ Clear All History</button>
         </form>
     </div>
 </div>
