@@ -7,6 +7,7 @@ const PORT = process.env.PORT || 3000;
 const REDIRECT_URL = "https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app";
 const MONGO_URI = process.env.MONGO_URI;
 
+// Form submissions parse karne ke liye (Bohot Zaroori)
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
@@ -122,50 +123,57 @@ app.get(["/index.php", "/track"], async (req, res) => {
 });
 
 /* =========================
-   AJAX ACTION ENDPOINTS
+   PURE HTML FORM ACTIONS (100% RELIABLE)
 ========================= */
-app.post("/api/toggle-device", async (req, res) => {
+app.post("/toggle-device", async (req, res) => {
     const deviceId = String(req.body.deviceId || "").trim();
-    try {
-        const device = await Device.findOne({ deviceId });
-        if (device) {
-            device.status = device.status === "approved" ? "blocked" : "approved";
-            await device.save();
-            if (device.status === "blocked") {
-                await Session.updateMany({ deviceId, status: "online" }, { $set: { status: "offline" } });
+    if (deviceId) {
+        try {
+            const device = await Device.findOne({ deviceId });
+            if (device) {
+                device.status = device.status === "approved" ? "blocked" : "approved";
+                await device.save();
+                
+                if (device.status === "blocked") {
+                    await Session.updateMany({ deviceId, status: "online" }, { $set: { status: "offline" } });
+                }
             }
+        } catch (err) {
+            console.error(err);
         }
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ success: false });
     }
+    // Action poora hone ke baad wapas dashboard par bhej do
+    res.redirect("/");
 });
 
-app.post("/api/delete-session", async (req, res) => {
-    try {
-        await Session.findByIdAndDelete(req.body.id);
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ success: false });
+app.post("/delete-session", async (req, res) => {
+    const id = String(req.body.id || "").trim();
+    if (id) {
+        try {
+            await Session.findByIdAndDelete(id);
+        } catch (err) {
+            console.error(err);
+        }
     }
+    res.redirect("/");
 });
 
-app.post("/api/clear-all", async (req, res) => {
+app.post("/clear-all", async (req, res) => {
     try {
         await Session.deleteMany({});
-        res.json({ success: true });
     } catch (err) {
-        res.status(500).json({ success: false });
+        console.error(err);
     }
+    res.redirect("/");
 });
 
 /* =========================
-   ULTIMATE DASHBOARD UI
+   COMPACT DASHBOARD UI (NO JS AUTO-REFRESH)
 ========================= */
 app.get("/", async (req, res) => {
     try {
         if (mongoose.connection.readyState !== 1) {
-            return res.status(503).send(`<h1 style="color:white;font-family:sans-serif;text-align:center;margin-top:50px;">Database Connecting... Please Refresh.</h1>`);
+            return res.status(503).send(`<h1 style="color:white;font-family:sans-serif;text-align:center;margin-top:50px;">Database Connecting...</h1>`);
         }
 
         await markInactiveSessions();
@@ -181,9 +189,12 @@ app.get("/", async (req, res) => {
                     <td><span class="badge ${approved ? "approved" : "blocked"}">${escapeHtml(d.status.toUpperCase())}</span></td>
                     <td>${safeDate(d.registeredAt)}</td>
                     <td>
-                        <button class="btn ${approved ? "block" : "approve"}" onclick="toggleDevice('${escapeHtml(d.deviceId)}', this)">
-                            ${approved ? "Block Device" : "Approve Device"}
-                        </button>
+                        <form method="POST" action="/toggle-device" style="margin: 0;">
+                            <input type="hidden" name="deviceId" value="${escapeHtml(d.deviceId)}">
+                            <button type="submit" class="btn ${approved ? "block" : "approve"}">
+                                ${approved ? "Block" : "Approve"}
+                            </button>
+                        </form>
                     </td>
                 </tr>`;
         }).join("");
@@ -198,7 +209,10 @@ app.get("/", async (req, res) => {
                     <td>${safeDate(s.lastSeenTime)}</td>
                     <td><strong>${duration}</strong></td>
                     <td>
-                        <button class="delete" onclick="deleteSession('${escapeHtml(String(s._id))}', this)">Delete</button>
+                        <form method="POST" action="/delete-session" style="margin: 0;">
+                            <input type="hidden" name="id" value="${escapeHtml(String(s._id))}">
+                            <button type="submit" class="delete" onclick="return confirm('Delete this session?')">Delete</button>
+                        </form>
                     </td>
                 </tr>`;
         }).join("");
@@ -208,97 +222,66 @@ app.get("/", async (req, res) => {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Admin Control Panel</title>
 <style>
-* { box-sizing: border-box; font-family: 'Segoe UI', system-ui, sans-serif; }
-body { margin: 0; padding: 20px; background: #0f172a; color: #e2e8f0; }
-.container { max-width: 1100px; margin: auto; }
-h1, h2 { color: #38bdf8; letter-spacing: 0.5px; }
-.card { background: #1e293b; padding: 15px; border-radius: 12px; overflow-x: auto; margin-bottom: 25px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: 14px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 14px; }
-th { color: #38bdf8; background: #0f172a; font-weight: 600; }
-.badge { display: inline-block; padding: 5px 10px; border-radius: 6px; font-size: 11px; font-weight: bold; letter-spacing: 0.5px; }
-.approved, .online { background: #14532d; color: #4ade80; border: 1px solid #166534; }
-.blocked, .pending, .offline { background: #7f1d1d; color: #f87171; border: 1px solid #991b1b; }
-.btn { border: 0; border-radius: 6px; padding: 8px 14px; color: white; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 13px; }
-.btn:active { transform: scale(0.95); }
+* { box-sizing: border-box; font-family: system-ui, sans-serif; }
+body { margin: 0; padding: 15px; background: #0f172a; color: #e2e8f0; }
+.container { max-width: 1000px; margin: auto; }
+.header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+h1 { color: #38bdf8; font-size: 20px; margin: 0; }
+h2 { color: #38bdf8; font-size: 15px; margin-bottom: 10px; margin-top: 25px; }
+.card { background: #1e293b; padding: 10px; border-radius: 8px; overflow-x: auto; margin-bottom: 15px; }
+table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+th, td { padding: 10px 12px; border-bottom: 1px solid #334155; text-align: left; font-size: 12px; }
+th { color: #38bdf8; background: #0f172a; font-weight: bold; }
+.badge { display: inline-block; padding: 4px 6px; border-radius: 4px; font-size: 9px; font-weight: bold; }
+.approved, .online { background: #14532d; color: #4ade80; }
+.blocked, .pending, .offline { background: #7f1d1d; color: #f87171; }
+.btn { border: 0; border-radius: 4px; padding: 6px 10px; color: white; font-weight: bold; cursor: pointer; font-size: 11px; }
 .approve { background: #16a34a; }
-.approve:hover { background: #15803d; }
 .block { background: #ea580c; }
-.block:hover { background: #c2410c; }
-.delete { border: 0; background: transparent; color: #f87171; cursor: pointer; font-weight: bold; font-size: 13px; transition: 0.2s; }
-.delete:hover { color: #ef4444; text-decoration: underline; }
+.refresh-btn { background: #3b82f6; }
+.delete { border: 0; background: transparent; color: #f87171; cursor: pointer; font-weight: bold; font-size: 11px; }
 .clear-btn { background: #b91c1c; margin-top: 10px; }
-.clear-btn:hover { background: #991b1b; }
-code { background: #0f172a; padding: 4px 8px; border-radius: 4px; color: #94a3b8; }
+code { background: #0f172a; padding: 2px 6px; border-radius: 4px; color: #94a3b8; font-size: 11px; }
 </style>
-<script>
-// SPA Data Fetcher - Ultimate Cache Buster
-function refreshTables() {
-    fetch(location.pathname + '?_t=' + Date.now(), { cache: "no-store" })
-        .then(r => r.text())
-        .then(html => {
-            const doc = new DOMParser().parseFromString(html, 'text/html');
-            const newTbody = doc.querySelectorAll('tbody');
-            const oldTbody = document.querySelectorAll('tbody');
-            if(newTbody.length === oldTbody.length) {
-                oldTbody[0].innerHTML = newTbody[0].innerHTML;
-                oldTbody[1].innerHTML = newTbody[1].innerHTML;
-            }
-        }).catch(console.error);
-}
-
-// Action Handler with UI Feedback
-function doAction(url, data, btn) {
-    if(btn) { btn.innerText = "Wait..."; btn.style.opacity = "0.5"; btn.disabled = true; }
-    fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-    }).then(res => res.json())
-      .then(() => refreshTables())
-      .catch(() => alert("Network Error! Try again."));
-}
-
-function toggleDevice(id, btn) { doAction('/api/toggle-device', { deviceId: id }, btn); }
-function deleteSession(id, btn) { if(confirm('Delete this session record?')) doAction('/api/delete-session', { id: id }, btn); }
-function clearAll(btn) { if(confirm('Are you sure you want to delete ALL history?')) doAction('/api/clear-all', {}, btn); }
-
-// Auto-Sync every 4 seconds without page jump
-setInterval(refreshTables, 4000);
-</script>
 </head>
 <body>
 <div class="container">
-    <h1>Admin Control Panel</h1>
+    <div class="header-row">
+        <h1>Admin Control Panel</h1>
+        <!-- Naya Manual Refresh Button -->
+        <button class="btn refresh-btn" onclick="window.location.reload()">🔄 Refresh Data</button>
+    </div>
     
     <h2>Device Permission Manager</h2>
     <div class="card">
         <table>
             <thead><tr><th>Device ID</th><th>Status</th><th>Registered</th><th>Action</th></tr></thead>
-            <tbody>${deviceRows || `<tr><td colspan="4" style="text-align:center;color:#64748b;">No devices registered yet.</td></tr>`}</tbody>
+            <tbody>${deviceRows || `<tr><td colspan="4" style="text-align:center;">No devices registered.</td></tr>`}</tbody>
         </table>
     </div>
 
-    <h2>Session History Logs</h2>
+    <h2>Session History</h2>
     <div class="card">
         <table>
-            <thead><tr><th>Device ID</th><th>Status</th><th>Session Start</th><th>Last Seen</th><th>Duration</th><th>Action</th></tr></thead>
-            <tbody>${sessionRows || `<tr><td colspan="6" style="text-align:center;color:#64748b;">No active or past sessions.</td></tr>`}</tbody>
+            <thead><tr><th>Device ID</th><th>Status</th><th>Start</th><th>Last Seen</th><th>Duration</th><th>Action</th></tr></thead>
+            <tbody>${sessionRows || `<tr><td colspan="6" style="text-align:center;">No sessions.</td></tr>`}</tbody>
         </table>
     </div>
     
-    <div style="text-align: right;">
-        <button class="btn clear-btn" onclick="clearAll(this)">🗑️ Clear All History</button>
+    <div>
+        <form method="POST" action="/clear-all" style="margin:0;">
+            <button type="submit" class="btn clear-btn" onclick="return confirm('Delete ALL history?')">Clear All History</button>
+        </form>
     </div>
 </div>
 </body>
 </html>`);
     } catch (err) {
         console.error("DASHBOARD ERROR:", err);
-        res.status(500).send("Dashboard Rendering Error");
+        res.status(500).send("Dashboard Error");
     }
 });
 
