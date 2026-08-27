@@ -4,7 +4,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Apna redirect link yahan daalein (Telegram/Instagram/Website profile)
-const REDIRECT_URL = "https://t.me/your_username";
+const REDIRECT_URL = "https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app";
 
 // 1. Environment Variable for MongoDB Connection
 const MONGO_URI = process.env.MONGO_URI;
