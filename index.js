@@ -55,7 +55,7 @@ if (IS_PRODUCTION && !SESSION_SECRET) {
 /* =========================================================
 EXPRESS SETUP
 ========================================================= */
-app.set("trust proxy", true); // Render proxy fix for CSRF
+app.set("trust proxy", 1); // 1 is the most secure setting for Render
 app.disable("x-powered-by");
 
 app.use(express.urlencoded({ extended: true, limit: "100kb" }));
@@ -75,14 +75,14 @@ app.use((req, res, next) => {
 });
 
 /* =========================================================
-MONGODB SESSION STORE
+MONGODB SESSION STORE (FIXED FOR RENDER PROXY)
 ========================================================= */
 app.use(
   session({
     name: "admin.sid",
     secret: SESSION_SECRET,
-    resave: true,              // Changed to true for proxy compatibility
-    saveUninitialized: true,   // Changed to true for proxy compatibility
+    resave: false,             // Set back to false to avoid DB race conditions
+    saveUninitialized: false,  // Set back to false
     store: MongoStore.create({
       mongoUrl: MONGO_URI,
       collectionName: "admin_sessions",
@@ -91,7 +91,7 @@ app.use(
     }),
     cookie: {
       httpOnly: true,
-      secure: IS_PRODUCTION,
+      secure: "auto",          // MAGIC FIX: Auto handles Render's HTTPS correctly
       sameSite: "lax",
       maxAge: 1000 * 60 * 60 * 24
     }
@@ -141,9 +141,7 @@ SessionSchema.index({ deviceId: 1, startTimestamp: -1 });
 /* Fast stale-session cleanup. */
 SessionSchema.index({ status: 1, lastSeenTimestamp: 1 });
 
-/* Prevent more than ONE active online session per device.
-MongoDB partial unique index: only documents where status = online are unique. 
-Added custom 'name' to fix the Render MongoDB conflict error! */
+/* Prevent more than ONE active online session per device. */
 SessionSchema.index(
   { deviceId: 1 },
   { 
@@ -232,7 +230,6 @@ function getRange(filter, customFrom, customTo) {
     }
   }
 
-  /* Invalid custom range protection. */
   if (from !== null && Number.isFinite(from) && Number.isFinite(to) && from > to) {
     return { from: to, to: from };
   }
@@ -244,20 +241,33 @@ function safeString(value, maxLength) {
 }
 
 /* =========================================================
-CSRF
+CSRF (FIXED RACE CONDITION)
 ========================================================= */
 function csrfProtection(req, res, next) {
   if (!req.session) { return res.status(500).send("Session unavailable."); }
-  if (!req.session.csrfToken) { req.session.csrfToken = crypto.randomBytes(24).toString("hex"); }
-  res.locals.csrfToken = req.session.csrfToken;
-  
-  if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE") {
-    const token = req.body?._csrf || req.get("x-csrf-token");
-    if (!token || token !== req.session.csrfToken) {
-      return res.status(403).send("CSRF validation failed.");
+
+  const validateAndNext = () => {
+    if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE") {
+      const token = req.body?._csrf || req.get("x-csrf-token");
+      if (!token || token !== req.session.csrfToken) {
+        return res.status(403).send("CSRF validation failed. Please go back, refresh the page, and try again.");
+      }
     }
+    next();
+  };
+
+  // If token doesn't exist, create it and FORCE save it to DB before proceeding
+  if (!req.session.csrfToken) {
+    req.session.csrfToken = crypto.randomBytes(24).toString("hex");
+    res.locals.csrfToken = req.session.csrfToken;
+    return req.session.save((err) => {
+      if (err) console.error("Session save error:", err);
+      validateAndNext();
+    });
   }
-  next();
+
+  res.locals.csrfToken = req.session.csrfToken;
+  validateAndNext();
 }
 
 /* =========================================================
@@ -283,7 +293,6 @@ async function verifyPassword(password) {
   const inputBuffer = Buffer.from(password);
   const storedBuffer = Buffer.from(ADMIN_PASSWORD);
   
-  /* timingSafeEqual throws if lengths differ. */
   if (inputBuffer.length !== storedBuffer.length) { return false; }
   return crypto.timingSafeEqual(inputBuffer, storedBuffer);
 }
@@ -368,6 +377,8 @@ app.post("/login", loginLimiter, csrfProtection, async (req, res) => {
       req.session.adminAuthenticated = true;
       req.session.adminUsername = ADMIN_USERNAME;
       req.session.csrfToken = crypto.randomBytes(24).toString("hex");
+      
+      // Force save session before redirecting
       req.session.save((saveErr) => {
         if (saveErr) {
           console.error("Session save error:", saveErr.message);
@@ -432,7 +443,6 @@ async function handleTracking(req, res) {
       }
     }
     
-    /* Newly created devices and non-approved devices are denied. */
     if (!device || device.status !== "approved") {
       await UsageSession.updateMany(
         { deviceId, status: "online" },
@@ -444,7 +454,6 @@ async function handleTracking(req, res) {
     const now = Date.now();
     const nowDate = new Date(now);
 
-    /* Explicit stop. */
     if (action === "stop") {
       await UsageSession.findOneAndUpdate(
         { deviceId, status: "online" },
@@ -454,14 +463,12 @@ async function handleTracking(req, res) {
       return res.status(200).json({ status: "ALLOWED", action: "STOPPED" });
     }
 
-    /* Update active session heartbeat. */
     let activeSession = await UsageSession.findOneAndUpdate(
       { deviceId, status: "online" },
       { $set: { lastSeenTimestamp: now, lastSeenTime: nowDate } },
       { sort: { startTimestamp: -1 }, new: true }
     );
 
-    /* No active session: create one. Duplicate-key race is handled. */
     if (!activeSession) {
       try {
         activeSession = await UsageSession.create({
@@ -594,7 +601,6 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
     const range = getRange(filter, customFrom, customTo);
     const now = Date.now();
 
-    /* A session overlaps a selected range if: sessionStart <= rangeEnd AND sessionEnd >= rangeStart */
     const sessionMatch = {};
     if (range.from !== null) {
       sessionMatch.startTimestamp = { $lte: range.to };
@@ -874,12 +880,10 @@ let isEditing = false;
 let refreshInProgress = false;
 const refreshStatus = document.getElementById("refreshStatus");
 
-/* ===================================================== ESCAPE HTML ===================================================== */
 function escapeHTML(value){ 
   return String(value ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;"); 
 }
 
-/* ===================================================== DASHBOARD REFRESH ===================================================== */
 async function refreshDashboard(){
   if(refreshInProgress){ return; }
   if(isEditing){ refreshStatus.innerText = "Refresh paused while editing"; refreshStatus.style.color = "#fbbf24"; return; }
@@ -914,10 +918,8 @@ async function refreshDashboard(){
   }
 }
 
-/* ===================================================== MANUAL REFRESH ===================================================== */
 function manualRefresh(){ isEditing = false; refreshDashboard(); }
 
-/* ===================================================== STATS ===================================================== */
 function updateStats(stats){
   document.getElementById("totalDevices").innerText = stats.totalDevices;
   document.getElementById("approved").innerText = stats.approved;
@@ -927,7 +929,6 @@ function updateStats(stats){
   document.getElementById("totalUsage").innerText = stats.totalUsage;
 }
 
-/* ===================================================== CHART ===================================================== */
 function updateChart(chart){
   const canvas = document.getElementById("usageChart");
   if(chartInstance){ chartInstance.destroy(); }
@@ -948,7 +949,6 @@ function updateChart(chart){
   });
 }
 
-/* ===================================================== DEVICE TABLE ===================================================== */
 function updateTable(devices){
   const tbody = document.getElementById("deviceTable");
   if(!devices.length){ tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:20px;">No devices found.</td></tr>'; return; }
@@ -982,7 +982,6 @@ function updateTable(devices){
   });
 }
 
-/* ===================================================== HISTORY ===================================================== */
 async function openHistory(deviceId, nickname){
   const modal = document.getElementById("historyModal");
   const modalTitle = document.getElementById("modalTitle");
@@ -1010,7 +1009,6 @@ async function openHistory(deviceId, nickname){
 function closeModal(){ document.getElementById("historyModal").style.display = "none"; }
 window.addEventListener("click", function(event){ const modal = document.getElementById("historyModal"); if(event.target === modal){ closeModal(); } });
 
-/* ===================================================== PAGINATION ===================================================== */
 function updatePagination(pagination){
   currentPage = pagination.page;
   document.getElementById("pageInfo").innerText = "Page " + pagination.page + " of " + pagination.totalPages;
@@ -1018,14 +1016,12 @@ function updatePagination(pagination){
   document.getElementById("nextPage").disabled = pagination.page >= pagination.totalPages;
 }
 
-/* ===================================================== AUTO REFRESH ===================================================== */
 function scheduleRefresh(){
   clearTimeout(refreshTimer);
   if(isEditing){ refreshStatus.innerText = "Refresh paused while editing"; refreshStatus.style.color = "#fbbf24"; return; }
   refreshTimer = setTimeout(function(){ refreshDashboard(); }, ${DASHBOARD_REFRESH_SECONDS * 1000});
 }
 
-/* Only search/filter controls pause refresh. */
 document.querySelectorAll("#filterForm input, #filterForm select").forEach(function(element){
   element.addEventListener("focus", function(){ isEditing = true; clearTimeout(refreshTimer); refreshStatus.innerText = "Refresh paused while editing"; refreshStatus.style.color = "#fbbf24"; });
   element.addEventListener("blur", function(){ setTimeout(function(){ const active = document.activeElement; const stillEditing = active && active.closest && active.closest("#filterForm"); isEditing = Boolean(stillEditing); if(!isEditing){ scheduleRefresh(); } }, 100); });
@@ -1038,7 +1034,6 @@ document.getElementById("nextPage").addEventListener("click", function(){ curren
 
 document.addEventListener("visibilitychange", function(){ if(document.hidden){ clearTimeout(refreshTimer); } else { scheduleRefresh(); } });
 
-/* Initial load. */
 refreshDashboard();
 </script>
 </body>
@@ -1054,7 +1049,6 @@ async function startServer() {
     await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 10000 });
     console.log("MongoDB CONNECTED");
     
-    /* Ensure indexes exist. */
     await Promise.all([Device.init(), UsageSession.init()]);
     console.log("MongoDB indexes ready");
     
