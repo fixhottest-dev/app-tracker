@@ -55,7 +55,7 @@ if (IS_PRODUCTION && !SESSION_SECRET) {
 /* =========================================================
 EXPRESS SETUP
 ========================================================= */
-app.set("trust proxy", 1);
+app.set("trust proxy", true); // Render proxy fix for CSRF
 app.disable("x-powered-by");
 
 app.use(express.urlencoded({ extended: true, limit: "100kb" }));
@@ -81,8 +81,8 @@ app.use(
   session({
     name: "admin.sid",
     secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
+    resave: true,              // Changed to true for proxy compatibility
+    saveUninitialized: true,   // Changed to true for proxy compatibility
     store: MongoStore.create({
       mongoUrl: MONGO_URI,
       collectionName: "admin_sessions",
