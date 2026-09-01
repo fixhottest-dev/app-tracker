@@ -17,12 +17,15 @@ CONFIGURATION
 ========================================================= */
 const PORT = Number(process.env.PORT || 3000);
 const MONGO_URI = process.env.MONGO_URI;
+
 const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME || "admin");
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH;
+
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || (IS_PRODUCTION ? null : crypto.randomBytes(32).toString("hex"));
+
 const REDIRECT_URL = process.env.REDIRECT_URL || "https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app";
 
 const ONLINE_TIMEOUT_MS = 25000;
@@ -38,10 +41,12 @@ if (!MONGO_URI) {
   console.error("FATAL ERROR: MONGO_URI is missing.");
   process.exit(1);
 }
+
 if (!ADMIN_PASSWORD && !ADMIN_PASSWORD_HASH) {
   console.error("FATAL ERROR: ADMIN_PASSWORD or ADMIN_PASSWORD_HASH is required.");
   process.exit(1);
 }
+
 if (IS_PRODUCTION && !SESSION_SECRET) {
   console.error("FATAL ERROR: SESSION_SECRET is required in production.");
   process.exit(1);
@@ -52,6 +57,7 @@ EXPRESS SETUP
 ========================================================= */
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
+
 app.use(express.urlencoded({ extended: true, limit: "100kb" }));
 app.use(express.json({ limit: "100kb" }));
 
@@ -131,10 +137,21 @@ const SessionSchema = new mongoose.Schema({
 
 /* Fast device history lookup. */
 SessionSchema.index({ deviceId: 1, startTimestamp: -1 });
+
 /* Fast stale-session cleanup. */
 SessionSchema.index({ status: 1, lastSeenTimestamp: 1 });
-/* Prevent more than ONE active online session per device. */
-SessionSchema.index({ deviceId: 1 }, { unique: true, partialFilterExpression: { status: "online" } });
+
+/* Prevent more than ONE active online session per device.
+MongoDB partial unique index: only documents where status = online are unique. 
+Added custom 'name' to fix the Render MongoDB conflict error! */
+SessionSchema.index(
+  { deviceId: 1 },
+  { 
+    unique: true, 
+    partialFilterExpression: { status: "online" },
+    name: "unique_online_device_idx"
+  }
+);
 
 const Device = mongoose.model("Device", DeviceSchema);
 const UsageSession = mongoose.model("UsageSession", SessionSchema);
@@ -165,6 +182,7 @@ function formatDuration(ms) {
   const hours = Math.floor((totalSeconds % 86400) / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
+  
   const result = [];
   if (days > 0) { result.push(days + "d"); }
   if (hours > 0) { result.push(hours + "h"); }
@@ -187,7 +205,11 @@ function getISTStartOfDay() {
   const parts = formatter.formatToParts(now);
   const values = {};
   parts.forEach((part) => { if (part.type !== "literal") { values[part.type] = part.value; } });
-  return (Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day), 0, 0, 0) - 5.5 * 60 * 60 * 1000);
+  
+  return (
+    Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day), 0, 0, 0) -
+    5.5 * 60 * 60 * 1000
+  );
 }
 
 function getRange(filter, customFrom, customTo) {
@@ -198,6 +220,7 @@ function getRange(filter, customFrom, customTo) {
   if (filter === "today") { from = getISTStartOfDay(); }
   if (filter === "7d") { from = now - 7 * 24 * 60 * 60 * 1000; }
   if (filter === "30d") { from = now - 30 * 24 * 60 * 60 * 1000; }
+  
   if (filter === "custom") {
     if (customFrom) {
       const parsedFrom = new Date(customFrom + "T00:00:00+05:30");
@@ -227,6 +250,7 @@ function csrfProtection(req, res, next) {
   if (!req.session) { return res.status(500).send("Session unavailable."); }
   if (!req.session.csrfToken) { req.session.csrfToken = crypto.randomBytes(24).toString("hex"); }
   res.locals.csrfToken = req.session.csrfToken;
+  
   if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE") {
     const token = req.body?._csrf || req.get("x-csrf-token");
     if (!token || token !== req.session.csrfToken) {
@@ -253,12 +277,12 @@ function requireApiLogin(req, res, next) {
 PASSWORD COMPARISON
 ========================================================= */
 async function verifyPassword(password) {
-  if (ADMIN_PASSWORD_HASH) {
-    return bcrypt.compare(password, ADMIN_PASSWORD_HASH);
-  }
+  if (ADMIN_PASSWORD_HASH) { return bcrypt.compare(password, ADMIN_PASSWORD_HASH); }
   if (!ADMIN_PASSWORD) { return false; }
+  
   const inputBuffer = Buffer.from(password);
   const storedBuffer = Buffer.from(ADMIN_PASSWORD);
+  
   /* timingSafeEqual throws if lengths differ. */
   if (inputBuffer.length !== storedBuffer.length) { return false; }
   return crypto.timingSafeEqual(inputBuffer, storedBuffer);
@@ -391,6 +415,7 @@ async function handleTracking(req, res) {
   if (!deviceId) {
     return res.status(400).json({ status: "ERROR", message: "DEVICE_ID_MISSING" });
   }
+
   if (mongoose.connection.readyState !== 1) {
     return res.status(503).json({ status: "ERROR", message: "DATABASE_OFFLINE" });
   }
@@ -406,6 +431,7 @@ async function handleTracking(req, res) {
         } else { throw createError; }
       }
     }
+    
     /* Newly created devices and non-approved devices are denied. */
     if (!device || device.status !== "approved") {
       await UsageSession.updateMany(
@@ -435,7 +461,7 @@ async function handleTracking(req, res) {
       { sort: { startTimestamp: -1 }, new: true }
     );
 
-    /* No active session: create one. */
+    /* No active session: create one. Duplicate-key race is handled. */
     if (!activeSession) {
       try {
         activeSession = await UsageSession.create({
@@ -461,6 +487,7 @@ async function handleTracking(req, res) {
       status: "ALLOWED",
       action: activeSession && activeSession.startTimestamp === now ? "STARTED" : "HEARTBEAT"
     });
+
   } catch (err) {
     console.error("Tracking error:", err.message);
     return res.status(500).json({ status: "ERROR" });
@@ -563,6 +590,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
     const customFrom = String(req.query.from || "");
     const customTo = String(req.query.to || "");
     const requestedPage = Math.max(1, parseInt(req.query.page || "1", 10) || 1);
+    
     const range = getRange(filter, customFrom, customTo);
     const now = Date.now();
 
@@ -607,6 +635,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
     }
 
     const onlineCutoff = now - ONLINE_TIMEOUT_MS;
+    
     const [deviceStatusStats, totalSearchDevices, devices, usageStats, chartStats, onlineSessions] = await Promise.all([
       Device.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
       Device.countDocuments(deviceMatch),
@@ -672,7 +701,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
 });
 
 /* =========================================================
-MAIN DASHBOARD (WITH FIXED HTML)
+MAIN DASHBOARD (HTML FIXED)
 ========================================================= */
 app.get("/", requireLogin, csrfProtection, (req, res) => {
   const search = String(req.query.search || "");
@@ -864,15 +893,19 @@ async function refreshDashboard(){
     params.set("from", document.getElementById("from").value);
     params.set("to", document.getElementById("to").value);
     params.set("page", currentPage);
+    
     const response = await fetch("/api/dashboard?" + params.toString(), { credentials:"same-origin", cache:"no-store" });
     if(response.status === 401){ window.location.href = "/login"; return; }
     if(!response.ok){ throw new Error("Dashboard request failed"); }
+    
     const data = await response.json();
     if(!data.success){ throw new Error("Dashboard API error"); }
+    
     updateStats(data.stats);
     updateChart(data.chart);
     updateTable(data.devices);
     updatePagination(data.pagination);
+    
     refreshStatus.innerText = "Auto-refresh active"; refreshStatus.style.color = "#4ade80";
   } catch(error) {
     console.error(error); refreshStatus.innerText = "Refresh failed"; refreshStatus.style.color = "#f87171";
@@ -919,6 +952,7 @@ function updateChart(chart){
 function updateTable(devices){
   const tbody = document.getElementById("deviceTable");
   if(!devices.length){ tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:20px;">No devices found.</td></tr>'; return; }
+  
   tbody.innerHTML = devices.map(function(device){
     const permission = escapeHTML(device.status);
     const liveClass = device.online ? "online" : "offline";
@@ -927,14 +961,17 @@ function updateTable(devices){
     const nickname = escapeHTML(device.nickname);
     
     let actionButtons = '<button class="btn history-btn" type="button" data-history="' + deviceId + '" data-nickname="' + nickname + '">History</button>';
+    
     if(device.status !== "approved"){
       actionButtons += '<form method="POST" action="/action/approve"><input type="hidden" name="_csrf" value="' + csrfToken + '"><input type="hidden" name="deviceId" value="' + deviceId + '"><button class="btn approve" type="submit">Approve</button></form>';
     } else {
       actionButtons += '<form method="POST" action="/action/block"><input type="hidden" name="_csrf" value="' + csrfToken + '"><input type="hidden" name="deviceId" value="' + deviceId + '"><button class="btn block" type="submit">Block</button></form>';
     }
+    
     if(device.status !== "pending"){
       actionButtons += '<form method="POST" action="/action/pending"><input type="hidden" name="_csrf" value="' + csrfToken + '"><input type="hidden" name="deviceId" value="' + deviceId + '"><button class="btn pending-btn" type="submit">Pending</button></form>';
     }
+    
     actionButtons += '<form method="POST" action="/action/delete" onsubmit="return confirm(\\'Delete this device permanently?\\');"><input type="hidden" name="_csrf" value="' + csrfToken + '"><input type="hidden" name="deviceId" value="' + deviceId + '"><button class="btn delete-btn" type="submit">Delete</button></form>';
     
     return '<tr><td><form method="POST" action="/action/nickname" style="display:flex;gap:5px;"><input type="hidden" name="_csrf" value="' + csrfToken + '"><input type="hidden" name="deviceId" value="' + deviceId + '"><input class="nickname-input" name="nickname" value="' + nickname + '" placeholder="Nickname" maxlength="50"><button class="btn refresh-btn" type="submit">Save</button></form></td><td><code>' + deviceId + '</code></td><td><span class="badge ' + permission + '">' + permission.toUpperCase() + '</span></td><td><span class="badge ' + liveClass + '">' + liveText + '</span></td><td><strong>' + escapeHTML(device.usage) + '</strong><br><small>' + Number(device.sessions) + ' sessions</small></td><td>' + escapeHTML(device.registeredAt) + '</td><td class="action-cell">' + actionButtons + '</td></tr>';
@@ -950,14 +987,17 @@ async function openHistory(deviceId, nickname){
   const modal = document.getElementById("historyModal");
   const modalTitle = document.getElementById("modalTitle");
   const tableBody = document.getElementById("historyTableBody");
+  
   modalTitle.innerText = "History: " + (nickname || deviceId);
   tableBody.innerHTML = '<tr><td colspan="4" style="text-align:center;">Fetching records...</td></tr>';
   modal.style.display = "flex";
+  
   try{
     const response = await fetch("/api/sessions/" + encodeURIComponent(deviceId), { credentials:"same-origin", cache:"no-store" });
     if(response.status === 401){ window.location.href = "/login"; return; }
     const data = await response.json();
     if(!data.success || !data.sessions.length){ tableBody.innerHTML = '<tr><td colspan="4" style="text-align:center;">No sessions recorded yet.</td></tr>'; return; }
+    
     tableBody.innerHTML = data.sessions.map(function(item){
       const statusClass = item.status === "online" ? "online" : "offline";
       return '<tr><td>' + escapeHTML(item.startTime) + '</td><td>' + escapeHTML(item.lastSeenTime) + '</td><td><strong>' + escapeHTML(item.duration) + '</strong></td><td><span class="badge ' + statusClass + '">' + escapeHTML(String(item.status).toUpperCase()) + '</span></td></tr>';
@@ -1013,9 +1053,11 @@ async function startServer() {
   try {
     await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 10000 });
     console.log("MongoDB CONNECTED");
+    
     /* Ensure indexes exist. */
     await Promise.all([Device.init(), UsageSession.init()]);
     console.log("MongoDB indexes ready");
+    
     app.listen(PORT, () => {
       console.log("Ultimate Admin Dashboard V5 running on port " + PORT);
     });
