@@ -37,23 +37,6 @@ const REDIRECT_URL =
   process.env.REDIRECT_URL ||
   "https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app";
 
-/*
-Heartbeat architecture:
-
-Client:
-START
-  ↓
-PING every 15 seconds
-  ↓
-STOP when lifecycle stops
-
-Server:
-Last heartbeat < timeout = ONLINE
-
-Last heartbeat >= timeout = OFFLINE
-Session closes automatically.
-*/
-
 const ONLINE_TIMEOUT_MS = Number(
   process.env.ONLINE_TIMEOUT_MS || 45000
 );
@@ -70,7 +53,8 @@ const MAX_DEVICE_ID_LENGTH = 200;
 const MAX_NICKNAME_LENGTH = 50;
 const MAX_SEARCH_LENGTH = 100;
 
-const ADMIN_SESSION_MAX_AGE = 24 * 60 * 60 * 1000;
+const ADMIN_SESSION_MAX_AGE =
+  24 * 60 * 60 * 1000;
 
 /* =========================================================
    HARD FAIL CONFIG CHECKS
@@ -230,8 +214,15 @@ const DeviceSchema = new mongoose.Schema(
     deviceId: {
       type: String,
       required: true,
+
+      /*
+      unique already creates the required
+      unique MongoDB index.
+
+      Do NOT also add index:true here.
+      */
       unique: true,
-      index: true,
+
       trim: true,
       maxlength: MAX_DEVICE_ID_LENGTH
     },
@@ -271,30 +262,9 @@ const DeviceSchema = new mongoose.Schema(
   }
 );
 
-/*
-SESSION MODEL
-
-Server owns all timestamps.
-
-startTime:
-when session started
-
-lastSeenTime:
-latest heartbeat
-
-endTime:
-final session end
-
-status:
-online/offline
-
-endReason:
-stop
-timeout
-blocked
-pending
-deleted
-*/
+/* =========================================================
+   SESSION SCHEMA
+========================================================= */
 
 const SessionSchema = new mongoose.Schema(
   {
@@ -379,27 +349,21 @@ const SessionSchema = new mongoose.Schema(
   }
 );
 
-/*
-FAST HISTORY
-*/
+/* FAST HISTORY */
 
 SessionSchema.index({
   deviceId: 1,
   startTimestamp: -1
 });
 
-/*
-STALE CLEANUP
-*/
+/* STALE CLEANUP */
 
 SessionSchema.index({
   status: 1,
   lastSeenTimestamp: 1
 });
 
-/*
-ONLY ONE ONLINE SESSION PER DEVICE
-*/
+/* ONLY ONE ONLINE SESSION PER DEVICE */
 
 SessionSchema.index(
   {
@@ -488,21 +452,21 @@ function formatDuration(ms) {
     return "0s";
   }
 
-  const totalSeconds = Math.floor(
-    safeMs / 1000
-  );
+  const totalSeconds =
+    Math.floor(safeMs / 1000);
 
-  const days = Math.floor(
-    totalSeconds / 86400
-  );
+  const days =
+    Math.floor(totalSeconds / 86400);
 
-  const hours = Math.floor(
-    (totalSeconds % 86400) / 3600
-  );
+  const hours =
+    Math.floor(
+      (totalSeconds % 86400) / 3600
+    );
 
-  const minutes = Math.floor(
-    (totalSeconds % 3600) / 60
-  );
+  const minutes =
+    Math.floor(
+      (totalSeconds % 3600) / 60
+    );
 
   const seconds =
     totalSeconds % 60;
@@ -538,11 +502,7 @@ function safeDate(value) {
 
   const date = new Date(value);
 
-  if (
-    Number.isNaN(
-      date.getTime()
-    )
-  ) {
+  if (Number.isNaN(date.getTime())) {
     return String(value);
   }
 
@@ -550,11 +510,8 @@ function safeDate(value) {
     "en-IN",
     {
       timeZone: "Asia/Kolkata",
-
       dateStyle: "medium",
-
       timeStyle: "medium",
-
       hour12: true
     }
   );
@@ -568,11 +525,8 @@ function getISTStartOfDay() {
       "en-CA",
       {
         timeZone: "Asia/Kolkata",
-
         year: "numeric",
-
         month: "2-digit",
-
         day: "2-digit"
       }
     );
@@ -583,9 +537,7 @@ function getISTStartOfDay() {
   const values = {};
 
   parts.forEach((part) => {
-    if (
-      part.type !== "literal"
-    ) {
+    if (part.type !== "literal") {
       values[part.type] =
         part.value;
     }
@@ -593,15 +545,10 @@ function getISTStartOfDay() {
 
   return Date.UTC(
     Number(values.year),
-
     Number(values.month) - 1,
-
     Number(values.day),
-
     0,
-
     0,
-
     0
   ) - (5.5 * 60 * 60 * 1000);
 }
@@ -614,7 +561,6 @@ function getRange(
   const now = Date.now();
 
   let from = null;
-
   let to = now;
 
   if (filter === "today") {
@@ -641,13 +587,8 @@ function getRange(
           "T00:00:00+05:30"
         );
 
-      if (
-        !Number.isNaN(
-          parsed.getTime()
-        )
-      ) {
-        from =
-          parsed.getTime();
+      if (!Number.isNaN(parsed.getTime())) {
+        from = parsed.getTime();
       }
     }
 
@@ -658,13 +599,8 @@ function getRange(
           "T23:59:59.999+05:30"
         );
 
-      if (
-        !Number.isNaN(
-          parsed.getTime()
-        )
-      ) {
-        to =
-          parsed.getTime();
+      if (!Number.isNaN(parsed.getTime())) {
+        to = parsed.getTime();
       }
     }
   }
@@ -674,9 +610,7 @@ function getRange(
     from > to
   ) {
     const temp = from;
-
     from = to;
-
     to = temp;
   }
 
@@ -698,9 +632,7 @@ function csrfProtection(
   if (!req.session) {
     return res
       .status(500)
-      .send(
-        "Session unavailable."
-      );
+      .send("Session unavailable.");
   }
 
   const method =
@@ -729,14 +661,11 @@ function csrfProtection(
 
     if (
       !token ||
-      token !==
-      req.session.csrfToken
+      token !== req.session.csrfToken
     ) {
       return res
         .status(403)
-        .send(
-          "CSRF validation failed."
-        );
+        .send("CSRF validation failed.");
     }
   }
 
@@ -759,9 +688,7 @@ function requireLogin(
     return next();
   }
 
-  return res.redirect(
-    "/login"
-  );
+  return res.redirect("/login");
 }
 
 function requireApiLogin(
@@ -778,7 +705,6 @@ function requireApiLogin(
 
   return res.status(401).json({
     success: false,
-
     error: "UNAUTHORIZED"
   });
 }
@@ -787,9 +713,7 @@ function requireApiLogin(
    PASSWORD
 ========================================================= */
 
-async function verifyPassword(
-  password
-) {
+async function verifyPassword(password) {
   if (ADMIN_PASSWORD_HASH) {
     return bcrypt.compare(
       password,
@@ -802,19 +726,12 @@ async function verifyPassword(
   }
 
   const input =
-    Buffer.from(
-      String(password)
-    );
+    Buffer.from(String(password));
 
   const stored =
-    Buffer.from(
-      ADMIN_PASSWORD
-    );
+    Buffer.from(ADMIN_PASSWORD);
 
-  if (
-    input.length !==
-    stored.length
-  ) {
+  if (input.length !== stored.length) {
     return false;
   }
 
@@ -834,71 +751,62 @@ async function closeOnlineSession(
   timestamp
 ) {
   const now =
-    Number(timestamp) ||
-    Date.now();
+    Number(timestamp) || Date.now();
 
   const nowDate =
     new Date(now);
 
-  return UsageSession.findOneAndUpdate(
-    {
-      deviceId,
-      status: "online"
-    },
-
-    {
-      $set: {
-        status: "offline",
-
-        endReason: reason,
-
-        endTime: nowDate,
-
-        endTimestamp: now,
-
-        lastSeenTime: nowDate,
-
-        lastSeenTimestamp: now
-      }
-    },
-
-    {
-      new: true,
-
-      sort: {
-        startTimestamp: -1
-      }
-    }
-  ).then(async (sessionDoc) => {
-    if (!sessionDoc) {
-      return null;
-    }
-
-    const duration =
-      Math.max(
-        0,
-        now -
-        Number(
-          sessionDoc.startTimestamp
-        )
-      );
-
-    await UsageSession.updateOne(
+  const sessionDoc =
+    await UsageSession.findOneAndUpdate(
       {
-        _id:
-          sessionDoc._id
+        deviceId,
+        status: "online"
       },
 
       {
         $set: {
-          durationMs:
-            duration
+          status: "offline",
+          endReason: reason,
+          endTime: nowDate,
+          endTimestamp: now,
+          lastSeenTime: nowDate,
+          lastSeenTimestamp: now
+        }
+      },
+
+      {
+        new: true,
+
+        sort: {
+          startTimestamp: -1
         }
       }
     );
 
-    return sessionDoc;
-  });
+  if (!sessionDoc) {
+    return null;
+  }
+
+  const duration =
+    Math.max(
+      0,
+      now -
+      Number(sessionDoc.startTimestamp)
+    );
+
+  await UsageSession.updateOne(
+    {
+      _id: sessionDoc._id
+    },
+
+    {
+      $set: {
+        durationMs: duration
+      }
+    }
+  );
+
+  return sessionDoc;
 }
 
 /* =========================================================
@@ -915,12 +823,10 @@ async function markStaleSessionsOffline() {
   cleanupRunning = true;
 
   try {
-    const now =
-      Date.now();
+    const now = Date.now();
 
     const cutoff =
-      now -
-      ONLINE_TIMEOUT_MS;
+      now - ONLINE_TIMEOUT_MS;
 
     const staleSessions =
       await UsageSession.find({
@@ -932,79 +838,48 @@ async function markStaleSessionsOffline() {
       })
         .select({
           _id: 1,
-
           startTimestamp: 1,
-
           lastSeenTimestamp: 1
         })
         .lean();
 
-    if (
-      !staleSessions.length
-    ) {
+    if (!staleSessions.length) {
       return;
     }
 
     const operations =
-      staleSessions.map(
-        (item) => {
-          /*
-          Session ends at last heartbeat,
-          not cleanup time.
+      staleSessions.map((item) => {
+        const endTimestamp =
+          Number(item.lastSeenTimestamp);
 
-          This prevents artificial extra
-          duration from cleanup delay.
-          */
+        const duration =
+          Math.max(
+            0,
+            endTimestamp -
+            Number(item.startTimestamp)
+          );
 
-          const endTimestamp =
-            Number(
-              item.lastSeenTimestamp
-            );
+        return {
+          updateOne: {
+            filter: {
+              _id: item._id,
+              status: "online"
+            },
 
-          const duration =
-            Math.max(
-              0,
-              endTimestamp -
-              Number(
-                item.startTimestamp
-              )
-            );
-
-          return {
-            updateOne: {
-              filter: {
-                _id: item._id,
-
-                status: "online"
-              },
-
-              update: {
-                $set: {
-                  status:
-                    "offline",
-
-                  endReason:
-                    "timeout",
-
-                  endTime:
-                    new Date(
-                      endTimestamp
-                    ),
-
-                  endTimestamp,
-
-                  durationMs:
-                    duration
-                }
+            update: {
+              $set: {
+                status: "offline",
+                endReason: "timeout",
+                endTime: new Date(endTimestamp),
+                endTimestamp,
+                durationMs: duration
               }
             }
-          };
-        }
-      );
+          }
+        };
+      });
 
-    if (
-      operations.length
-    ) {
+    if (operations.length) {
       await UsageSession.bulkWrite(
         operations,
         {
@@ -1012,13 +887,18 @@ async function markStaleSessionsOffline() {
         }
       );
     }
+
   } catch (err) {
+
     console.error(
       "Stale cleanup error:",
       err.message
     );
+
   } finally {
+
     cleanupRunning = false;
+
   }
 }
 
@@ -1037,10 +917,8 @@ cleanupInterval.unref();
 app.get(
   "/login",
   csrfProtection,
-  (
-    req,
-    res
-  ) => {
+  (req, res) => {
+
     if (
       req.session &&
       req.session.adminAuthenticated
@@ -1052,14 +930,8 @@ app.get(
 <!DOCTYPE html>
 <html>
 <head>
-
 <meta charset="UTF-8">
-
-<meta
-name="viewport"
-content="width=device-width,initial-scale=1"
->
-
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Administrator Login</title>
 
 <style>
@@ -1087,9 +959,7 @@ background:#ffffff;
 border:1px solid #e5e7eb;
 border-radius:12px;
 padding:32px;
-box-shadow:
-0 10px 30px
-rgba(0,0,0,.08);
+box-shadow:0 10px 30px rgba(0,0,0,.08);
 }
 
 .logo{
@@ -1134,9 +1004,7 @@ outline:none;
 
 input:focus{
 border-color:#374151;
-box-shadow:
-0 0 0 3px
-rgba(55,65,81,.1);
+box-shadow:0 0 0 3px rgba(55,65,81,.1);
 }
 
 button{
@@ -1149,10 +1017,6 @@ background:#111827;
 color:white;
 font-weight:600;
 cursor:pointer;
-}
-
-button:hover{
-background:#000;
 }
 
 .error{
@@ -1173,20 +1037,15 @@ text-align:center;
 }
 
 </style>
-
 </head>
 
 <body>
 
 <div class="login-card">
 
-<div class="logo">
-A
-</div>
+<div class="logo">A</div>
 
-<h1>
-Administrator Login
-</h1>
+<h1>Administrator Login</h1>
 
 <p>
 Sign in to access the device management console.
@@ -1202,10 +1061,7 @@ Invalid username or password.
 : ""
 }
 
-<form
-method="POST"
-action="/login"
->
+<form method="POST" action="/login">
 
 <input
 type="hidden"
@@ -1213,9 +1069,7 @@ name="_csrf"
 value="${escapeHtml(res.locals.csrfToken)}"
 >
 
-<label>
-Username
-</label>
+<label>Username</label>
 
 <input
 type="text"
@@ -1224,9 +1078,7 @@ autocomplete="username"
 required
 >
 
-<label>
-Password
-</label>
+<label>Password</label>
 
 <input
 type="password"
@@ -1264,11 +1116,10 @@ app.post(
 
   csrfProtection,
 
-  async (
-    req,
-    res
-  ) => {
+  async (req, res) => {
+
     try {
+
       const username =
         safeString(
           req.body.username,
@@ -1276,13 +1127,10 @@ app.post(
         );
 
       const password =
-        String(
-          req.body.password || ""
-        );
+        String(req.body.password || "");
 
       if (
-        username !==
-        ADMIN_USERNAME
+        username !== ADMIN_USERNAME
       ) {
         return res.redirect(
           "/login?error=1"
@@ -1290,9 +1138,7 @@ app.post(
       }
 
       const valid =
-        await verifyPassword(
-          password
-        );
+        await verifyPassword(password);
 
       if (!valid) {
         return res.redirect(
@@ -1300,12 +1146,36 @@ app.post(
         );
       }
 
-      req.session.regenerate(
-        (err) => {
-          if (err) {
+      req.session.regenerate((err) => {
+
+        if (err) {
+          console.error(
+            "Session regenerate error:",
+            err.message
+          );
+
+          return res.redirect(
+            "/login?error=1"
+          );
+        }
+
+        req.session.adminAuthenticated =
+          true;
+
+        req.session.adminUsername =
+          ADMIN_USERNAME;
+
+        req.session.csrfToken =
+          crypto
+            .randomBytes(32)
+            .toString("hex");
+
+        req.session.save((saveErr) => {
+
+          if (saveErr) {
             console.error(
-              "Session regenerate error:",
-              err.message
+              "Session save error:",
+              saveErr.message
             );
 
             return res.redirect(
@@ -1313,38 +1183,14 @@ app.post(
             );
           }
 
-          req.session.adminAuthenticated =
-            true;
+          return res.redirect("/");
 
-          req.session.adminUsername =
-            ADMIN_USERNAME;
+        });
 
-          req.session.csrfToken =
-            crypto
-              .randomBytes(32)
-              .toString("hex");
+      });
 
-          req.session.save(
-            (saveErr) => {
-              if (saveErr) {
-                console.error(
-                  "Session save error:",
-                  saveErr.message
-                );
-
-                return res.redirect(
-                  "/login?error=1"
-                );
-              }
-
-              return res.redirect(
-                "/"
-              );
-            }
-          );
-        }
-      );
     } catch (err) {
+
       console.error(
         "Login error:",
         err.message
@@ -1353,7 +1199,9 @@ app.post(
       return res.redirect(
         "/login?error=1"
       );
+
     }
+
   }
 );
 
@@ -1368,21 +1216,16 @@ app.post(
 
   csrfProtection,
 
-  (
-    req,
-    res
-  ) => {
-    req.session.destroy(
-      () => {
-        res.clearCookie(
-          "admin.sid"
-        );
+  (req, res) => {
 
-        res.redirect(
-          "/login"
-        );
-      }
-    );
+    req.session.destroy(() => {
+
+      res.clearCookie("admin.sid");
+
+      res.redirect("/login");
+
+    });
+
   }
 );
 
@@ -1392,22 +1235,17 @@ app.post(
 
 app.get(
   "/health",
-  (
-    req,
-    res
-  ) => {
+  (req, res) => {
+
     const connected =
       mongoose.connection.readyState === 1;
 
     res
       .status(
-        connected
-          ? 200
-          : 503
+        connected ? 200 : 503
       )
       .json({
-        server:
-          "online",
+        server: "online",
 
         database:
           connected
@@ -1417,6 +1255,7 @@ app.get(
         timestamp:
           new Date().toISOString()
       });
+
   }
 );
 
@@ -1428,11 +1267,11 @@ async function handleTracking(
   req,
   res
 ) {
+
   const deviceId =
     safeString(
       req.query.id ||
       req.body?.id,
-
       MAX_DEVICE_ID_LENGTH
     );
 
@@ -1447,11 +1286,8 @@ async function handleTracking(
       .trim()
       .toLowerCase();
 
-  if (
-    rawAction === "offline"
-  ) {
-    rawAction =
-      "stop";
+  if (rawAction === "offline") {
+    rawAction = "stop";
   }
 
   const action =
@@ -1467,11 +1303,8 @@ async function handleTracking(
     return res
       .status(400)
       .json({
-        status:
-          "ERROR",
-
-        message:
-          "DEVICE_ID_MISSING"
+        status: "ERROR",
+        message: "DEVICE_ID_MISSING"
       });
   }
 
@@ -1481,19 +1314,12 @@ async function handleTracking(
     return res
       .status(503)
       .json({
-        status:
-          "ERROR",
-
-        message:
-          "DATABASE_OFFLINE"
+        status: "ERROR",
+        message: "DATABASE_OFFLINE"
       });
   }
 
   try {
-
-    /*
-    Find/create device.
-    */
 
     let device =
       await Device.findOne({
@@ -1501,48 +1327,55 @@ async function handleTracking(
       });
 
     if (!device) {
+
       try {
+
         device =
           await Device.create({
             deviceId,
 
-            status:
-              "pending",
+            status: "pending",
 
             registeredAt:
               new Date()
           });
+
       } catch (err) {
+
         if (
           err &&
           err.code === 11000
         ) {
+
           device =
             await Device.findOne({
               deviceId
             });
+
         } else {
+
           throw err;
+
         }
+
       }
+
     }
 
     /*
-    Not approved = close any active
-    session and block app.
+    Device not approved.
     */
 
     if (
       !device ||
-      device.status !==
-      "approved"
+      device.status !== "approved"
     ) {
+
       await closeOnlineSession(
         deviceId,
 
         device &&
-        device.status ===
-        "blocked"
+        device.status === "blocked"
           ? "blocked"
           : "pending",
 
@@ -1550,12 +1383,10 @@ async function handleTracking(
       );
 
       return res.json({
-        status:
-          "BLOCKED",
-
-        redirectUrl:
-          REDIRECT_URL
+        status: "BLOCKED",
+        redirectUrl: REDIRECT_URL
       });
+
     }
 
     const now =
@@ -1568,48 +1399,37 @@ async function handleTracking(
     STOP
     */
 
-    if (
-      action === "stop"
-    ) {
+    if (action === "stop") {
+
       const stopped =
         await closeOnlineSession(
           deviceId,
-
           "stop",
-
           now
         );
 
       return res.json({
-        status:
-          "ALLOWED",
+        status: "ALLOWED",
 
         action:
           stopped
             ? "STOPPED"
             : "NO_ACTIVE_SESSION"
       });
+
     }
 
     /*
-    START/PING:
-
-    First check if online session exists.
+    START / PING
     */
 
     let activeSession =
       await UsageSession.findOne({
         deviceId,
-
-        status:
-          "online"
+        status: "online"
       });
 
     if (activeSession) {
-
-      /*
-      Update heartbeat.
-      */
 
       activeSession.lastSeenTime =
         nowDate;
@@ -1620,21 +1440,14 @@ async function handleTracking(
       await activeSession.save();
 
       return res.json({
-        status:
-          "ALLOWED",
-
-        action:
-          "HEARTBEAT"
+        status: "ALLOWED",
+        action: "HEARTBEAT"
       });
+
     }
 
     /*
-    No active session.
-
-    Create new session.
-
-    Race condition handled by
-    unique partial index.
+    Create session.
     */
 
     try {
@@ -1661,6 +1474,12 @@ async function handleTracking(
 
     } catch (err) {
 
+      /*
+      Race condition:
+      another request created the
+      online session first.
+      */
+
       if (
         err &&
         err.code === 11000
@@ -1670,9 +1489,7 @@ async function handleTracking(
           await UsageSession.findOneAndUpdate(
             {
               deviceId,
-
-              status:
-                "online"
+              status: "online"
             },
 
             {
@@ -1691,22 +1508,21 @@ async function handleTracking(
           );
 
       } else {
+
         throw err;
+
       }
+
     }
 
     return res.json({
-      status:
-        "ALLOWED",
+      status: "ALLOWED",
 
-      action:
-        "STARTED",
+      action: "STARTED",
 
       sessionId:
         activeSession
-          ? String(
-              activeSession._id
-            )
+          ? String(activeSession._id)
           : null
     });
 
@@ -1720,13 +1536,12 @@ async function handleTracking(
     return res
       .status(500)
       .json({
-        status:
-          "ERROR",
-
-        message:
-          "TRACKING_FAILED"
+        status: "ERROR",
+        message: "TRACKING_FAILED"
       });
+
   }
+
 }
 
 app.get(
@@ -1762,15 +1577,10 @@ app.post(
 
   csrfProtection,
 
-  async (
-    req,
-    res
-  ) => {
+  async (req, res) => {
 
     const type =
-      String(
-        req.params.type || ""
-      );
+      String(req.params.type || "");
 
     const deviceId =
       safeString(
@@ -1780,16 +1590,13 @@ app.post(
 
     if (!deviceId) {
       return res.redirect(
-        req.get("referer") ||
-        "/"
+        req.get("referer") || "/"
       );
     }
 
     try {
 
-      if (
-        type === "nickname"
-      ) {
+      if (type === "nickname") {
 
         const nickname =
           safeString(
@@ -1808,11 +1615,10 @@ app.post(
             }
           }
         );
+
       }
 
-      if (
-        type === "approve"
-      ) {
+      if (type === "approve") {
 
         await Device.updateOne(
           {
@@ -1821,16 +1627,14 @@ app.post(
 
           {
             $set: {
-              status:
-                "approved"
+              status: "approved"
             }
           }
         );
+
       }
 
-      if (
-        type === "pending"
-      ) {
+      if (type === "pending") {
 
         await Device.updateOne(
           {
@@ -1839,24 +1643,20 @@ app.post(
 
           {
             $set: {
-              status:
-                "pending"
+              status: "pending"
             }
           }
         );
 
         await closeOnlineSession(
           deviceId,
-
           "pending",
-
           Date.now()
         );
+
       }
 
-      if (
-        type === "block"
-      ) {
+      if (type === "block") {
 
         await Device.updateOne(
           {
@@ -1865,26 +1665,23 @@ app.post(
 
           {
             $set: {
-              status:
-                "blocked"
+              status: "blocked"
             }
           }
         );
 
         await closeOnlineSession(
           deviceId,
-
           "blocked",
-
           Date.now()
         );
+
       }
 
-      if (
-        type === "delete"
-      ) {
+      if (type === "delete") {
 
         await Promise.all([
+
           Device.deleteOne({
             deviceId
           }),
@@ -1892,7 +1689,9 @@ app.post(
           UsageSession.deleteMany({
             deviceId
           })
+
         ]);
+
       }
 
     } catch (err) {
@@ -1901,12 +1700,13 @@ app.post(
         "Admin action error:",
         err.message
       );
+
     }
 
     return res.redirect(
-      req.get("referer") ||
-      "/"
+      req.get("referer") || "/"
     );
+
   }
 );
 
@@ -1919,10 +1719,7 @@ app.get(
 
   requireApiLogin,
 
-  async (
-    req,
-    res
-  ) => {
+  async (req, res) => {
 
     try {
 
@@ -1936,11 +1733,8 @@ app.get(
         return res
           .status(400)
           .json({
-            success:
-              false,
-
-            error:
-              "DEVICE_ID_REQUIRED"
+            success: false,
+            error: "DEVICE_ID_REQUIRED"
           });
       }
 
@@ -1951,8 +1745,7 @@ app.get(
           deviceId
         })
           .sort({
-            startTimestamp:
-              -1
+            startTimestamp: -1
           })
           .limit(200)
           .lean();
@@ -1961,99 +1754,69 @@ app.get(
         Date.now();
 
       const formatted =
-        sessions.map(
-          (item) => {
+        sessions.map((item) => {
 
-            const start =
-              Number(
-                item.startTimestamp
-              );
+          const start =
+            Number(item.startTimestamp);
 
-            let end =
-              Number(
-                item.endTimestamp ||
-                item.lastSeenTimestamp
-              );
+          let end =
+            Number(
+              item.endTimestamp ||
+              item.lastSeenTimestamp
+            );
 
-            if (
-              item.status ===
-              "online"
-            ) {
-              end =
-                now;
-            }
-
-            const duration =
-              item.status ===
-              "offline" &&
-              Number.isFinite(
-                Number(
-                  item.durationMs
-                )
-              ) &&
-              Number(
-                item.durationMs
-              ) > 0
-                ? Number(
-                    item.durationMs
-                  )
-                : Math.max(
-                    0,
-                    end - start
-                  );
-
-            return {
-              startTime:
-                safeDate(
-                  item.startTime
-                ),
-
-              lastSeenTime:
-                safeDate(
-                  item.lastSeenTime
-                ),
-
-              endTime:
-                item.endTime
-                  ? safeDate(
-                      item.endTime
-                    )
-                  : item.status ===
-                    "online"
-                    ? "Currently active"
-                    : safeDate(
-                        item.lastSeenTime
-                      ),
-
-              duration:
-                formatDuration(
-                  duration
-                ),
-
-              durationMs:
-                duration,
-
-              status:
-                item.status,
-
-              endReason:
-                item.endReason ||
-                (
-                  item.status ===
-                  "online"
-                    ? "active"
-                    : "unknown"
-                )
-            };
+          if (item.status === "online") {
+            end = now;
           }
-        );
+
+          const duration =
+            item.status === "offline" &&
+            Number(item.durationMs) > 0
+              ? Number(item.durationMs)
+              : Math.max(
+                  0,
+                  end - start
+                );
+
+          return {
+            startTime:
+              safeDate(item.startTime),
+
+            lastSeenTime:
+              safeDate(item.lastSeenTime),
+
+            endTime:
+              item.endTime
+                ? safeDate(item.endTime)
+                : item.status === "online"
+                  ? "Currently active"
+                  : safeDate(
+                      item.lastSeenTime
+                    ),
+
+            duration:
+              formatDuration(duration),
+
+            durationMs:
+              duration,
+
+            status:
+              item.status,
+
+            endReason:
+              item.endReason ||
+              (
+                item.status === "online"
+                  ? "active"
+                  : "unknown"
+              )
+          };
+
+        });
 
       return res.json({
-        success:
-          true,
-
-        sessions:
-          formatted
+        success: true,
+        sessions: formatted
       });
 
     } catch (err) {
@@ -2066,13 +1829,12 @@ app.get(
       return res
         .status(500)
         .json({
-          success:
-            false,
-
-          error:
-            "FETCH_FAILED"
+          success: false,
+          error: "FETCH_FAILED"
         });
+
     }
+
   }
 );
 
@@ -2085,10 +1847,7 @@ app.get(
 
   requireApiLogin,
 
-  async (
-    req,
-    res
-  ) => {
+  async (req, res) => {
 
     try {
 
@@ -2102,29 +1861,20 @@ app.get(
 
       const filter =
         String(
-          req.query.filter ||
-          "all"
+          req.query.filter || "all"
         );
 
       const customFrom =
-        String(
-          req.query.from ||
-          ""
-        );
+        String(req.query.from || "");
 
       const customTo =
-        String(
-          req.query.to ||
-          ""
-        );
+        String(req.query.to || "");
 
       const requestedPage =
         Math.max(
           1,
-
           parseInt(
-            req.query.page ||
-            "1",
+            req.query.page || "1",
             10
           ) || 1
         );
@@ -2139,10 +1889,6 @@ app.get(
       const now =
         Date.now();
 
-      /*
-      Device search.
-      */
-
       const deviceMatch = {};
 
       if (search) {
@@ -2154,51 +1900,36 @@ app.get(
           );
 
         deviceMatch.$or = [
+
           {
             deviceId: {
-              $regex:
-                escaped,
-
-              $options:
-                "i"
+              $regex: escaped,
+              $options: "i"
             }
           },
 
           {
             nickname: {
-              $regex:
-                escaped,
-
-              $options:
-                "i"
+              $regex: escaped,
+              $options: "i"
             }
           },
 
           {
             status: {
-              $regex:
-                escaped,
-
-              $options:
-                "i"
+              $regex: escaped,
+              $options: "i"
             }
           }
+
         ];
+
       }
-
-      /*
-      Session overlap.
-
-      A session counts if:
-
-      session.start <= range.end
-      AND
-      session.end >= range.start
-      */
 
       const effectiveEndExpression =
         {
           $cond: [
+
             {
               $eq: [
                 "$status",
@@ -2211,10 +1942,10 @@ app.get(
             {
               $ifNull: [
                 "$endTimestamp",
-
                 "$lastSeenTimestamp"
               ]
             }
+
           ]
         };
 
@@ -2222,32 +1953,29 @@ app.get(
         range.from !== null
           ? {
               startTimestamp: {
-                $lte:
-                  range.to
+                $lte: range.to
               },
 
               $or: [
+
                 {
                   endTimestamp: {
-                    $gte:
-                      range.from
+                    $gte: range.from
                   }
                 },
 
                 {
-                  endTimestamp:
-                    null,
+                  endTimestamp: null,
 
                   lastSeenTimestamp: {
-                    $gte:
-                      range.from
+                    $gte: range.from
                   }
                 },
 
                 {
-                  status:
-                    "online"
+                  status: "online"
                 }
+
               ]
             }
           : {};
@@ -2257,7 +1985,6 @@ app.get(
           ? {
               $max: [
                 "$startTimestamp",
-
                 range.from
               ]
             }
@@ -2268,89 +1995,93 @@ app.get(
           ? {
               $min: [
                 effectiveEndExpression,
-
                 range.to
               ]
             }
           : effectiveEndExpression;
 
       const usagePipeline = [
+
         {
-          $match:
-            sessionMatch
+          $match: sessionMatch
         },
 
         {
           $project: {
-            deviceId:
-              1,
+
+            deviceId: 1,
 
             durationStart:
               durationStartExpression,
 
             durationEnd:
               durationEndExpression
+
           }
         },
 
         {
           $project: {
-            deviceId:
-              1,
+
+            deviceId: 1,
 
             duration: {
               $max: [
+
                 0,
 
                 {
                   $subtract: [
                     "$durationEnd",
-
                     "$durationStart"
                   ]
                 }
+
               ]
             }
+
           }
         },
 
         {
           $group: {
-            _id:
-              "$deviceId",
+
+            _id: "$deviceId",
 
             totalUsage: {
-              $sum:
-                "$duration"
+              $sum: "$duration"
             },
 
             sessionCount: {
-              $sum:
-                1
+              $sum: 1
             }
+
           }
         }
+
       ];
 
       const chartPipeline = [
+
         {
-          $match:
-            sessionMatch
+          $match: sessionMatch
         },
 
         {
           $project: {
+
             day: {
+
               $dateToString: {
-                format:
-                  "%Y-%m-%d",
 
-                date:
-                  "$startTime",
+                format: "%Y-%m-%d",
 
-                timezone:
-                  "Asia/Kolkata"
+                date: "$startTime",
+
+                timezone: "Asia/Kolkata"
+
               }
+
             },
 
             durationStart:
@@ -2358,58 +2089,61 @@ app.get(
 
             durationEnd:
               durationEndExpression
+
           }
         },
 
         {
           $project: {
-            day:
-              1,
+
+            day: 1,
 
             duration: {
+
               $max: [
+
                 0,
 
                 {
                   $subtract: [
                     "$durationEnd",
-
                     "$durationStart"
                   ]
                 }
+
               ]
+
             }
+
           }
         },
 
         {
           $group: {
-            _id:
-              "$day",
+
+            _id: "$day",
 
             usage: {
-              $sum:
-                "$duration"
+              $sum: "$duration"
             }
+
           }
         },
 
         {
           $sort: {
-            _id:
-              1
+            _id: 1
           }
         }
+
       ];
 
       const onlineCutoff =
-        now -
-        ONLINE_TIMEOUT_MS;
+        now - ONLINE_TIMEOUT_MS;
 
       const skip =
         (
-          requestedPage -
-          1
+          requestedPage - 1
         ) *
         DEVICES_PER_PAGE;
 
@@ -2419,12 +2153,9 @@ app.get(
           Device.aggregate([
             {
               $group: {
-                _id:
-                  "$status",
-
+                _id: "$status",
                 count: {
-                  $sum:
-                    1
+                  $sum: 1
                 }
               }
             }
@@ -2434,17 +2165,12 @@ app.get(
             deviceMatch
           ),
 
-          Device.find(
-            deviceMatch
-          )
+          Device.find(deviceMatch)
             .sort({
-              registeredAt:
-                -1
+              registeredAt: -1
             })
             .skip(skip)
-            .limit(
-              DEVICES_PER_PAGE
-            )
+            .limit(DEVICES_PER_PAGE)
             .lean(),
 
           UsageSession.aggregate(
@@ -2456,17 +2182,14 @@ app.get(
           ),
 
           UsageSession.find({
-            status:
-              "online",
+            status: "online",
 
             lastSeenTimestamp: {
-              $gte:
-                onlineCutoff
+              $gte: onlineCutoff
             }
           })
             .select({
-              deviceId:
-                1
+              deviceId: 1
             })
             .lean()
 
@@ -2490,85 +2213,61 @@ app.get(
       const onlineSessions =
         results[5];
 
-      let totalDevices =
-        0;
-
-      let approved =
-        0;
-
-      let pending =
-        0;
-
-      let blocked =
-        0;
+      let totalDevices = 0;
+      let approved = 0;
+      let pending = 0;
+      let blocked = 0;
 
       deviceStatusStats.forEach(
         (item) => {
 
           const count =
-            Number(
-              item.count ||
-              0
-            );
+            Number(item.count || 0);
 
-          totalDevices +=
-            count;
+          totalDevices += count;
 
-          if (
-            item._id ===
-            "approved"
-          ) {
-            approved =
-              count;
+          if (item._id === "approved") {
+            approved = count;
           }
 
-          if (
-            item._id ===
-            "pending"
-          ) {
-            pending =
-              count;
+          if (item._id === "pending") {
+            pending = count;
           }
 
-          if (
-            item._id ===
-            "blocked"
-          ) {
-            blocked =
-              count;
+          if (item._id === "blocked") {
+            blocked = count;
           }
+
         }
       );
 
       const usageMap = {};
 
-      let totalUsage =
-        0;
+      let totalUsage = 0;
 
       usageStats.forEach(
         (item) => {
 
           const usage =
             Number(
-              item.totalUsage ||
-              0
+              item.totalUsage || 0
             );
 
           usageMap[
             String(item._id)
           ] = {
-            totalUsage:
-              usage,
+
+            totalUsage: usage,
 
             sessionCount:
               Number(
-                item.sessionCount ||
-                0
+                item.sessionCount || 0
               )
+
           };
 
-          totalUsage +=
-            usage;
+          totalUsage += usage;
+
         }
       );
 
@@ -2576,16 +2275,13 @@ app.get(
         new Set(
           onlineSessions.map(
             (item) =>
-              String(
-                item.deviceId
-              )
+              String(item.deviceId)
           )
         );
 
       const totalPages =
         Math.max(
           1,
-
           Math.ceil(
             totalSearchDevices /
             DEVICES_PER_PAGE
@@ -2598,13 +2294,8 @@ app.get(
           totalPages
         );
 
-      /*
-      Fix invalid page.
-      */
-
       if (
-        currentPage !==
-        requestedPage
+        currentPage !== requestedPage
       ) {
 
         devices =
@@ -2612,13 +2303,11 @@ app.get(
             deviceMatch
           )
             .sort({
-              registeredAt:
-                -1
+              registeredAt: -1
             })
             .skip(
               (
-                currentPage -
-                1
+                currentPage - 1
               ) *
               DEVICES_PER_PAGE
             )
@@ -2626,64 +2315,58 @@ app.get(
               DEVICES_PER_PAGE
             )
             .lean();
+
       }
 
       const deviceData =
-        devices.map(
-          (device) => {
+        devices.map((device) => {
 
-            const stat =
-              usageMap[
-                String(
-                  device.deviceId
-                )
-              ] || {
-                totalUsage:
-                  0,
+          const stat =
+            usageMap[
+              String(device.deviceId)
+            ] || {
 
-                sessionCount:
-                  0
-              };
+              totalUsage: 0,
+              sessionCount: 0
 
-            return {
-
-              deviceId:
-                device.deviceId,
-
-              nickname:
-                device.nickname ||
-                "",
-
-              status:
-                device.status,
-
-              registeredAt:
-                safeDate(
-                  device.registeredAt
-                ),
-
-              usage:
-                formatDuration(
-                  stat.totalUsage
-                ),
-
-              sessions:
-                stat.sessionCount,
-
-              online:
-                onlineSet.has(
-                  String(
-                    device.deviceId
-                  )
-                )
             };
-          }
-        );
+
+          return {
+
+            deviceId:
+              device.deviceId,
+
+            nickname:
+              device.nickname || "",
+
+            status:
+              device.status,
+
+            registeredAt:
+              safeDate(
+                device.registeredAt
+              ),
+
+            usage:
+              formatDuration(
+                stat.totalUsage
+              ),
+
+            sessions:
+              stat.sessionCount,
+
+            online:
+              onlineSet.has(
+                String(device.deviceId)
+              )
+
+          };
+
+        });
 
       return res.json({
 
-        success:
-          true,
+        success: true,
 
         stats: {
 
@@ -2702,6 +2385,7 @@ app.get(
             formatDuration(
               totalUsage
             )
+
         },
 
         devices:
@@ -2716,6 +2400,7 @@ app.get(
 
           totalDevices:
             totalSearchDevices
+
         },
 
         chart: {
@@ -2731,12 +2416,13 @@ app.get(
               (item) =>
                 Math.round(
                   Number(
-                    item.usage ||
-                    0
+                    item.usage || 0
                   ) / 60000
                 )
             )
+
         }
+
       });
 
     } catch (err) {
@@ -2749,13 +2435,12 @@ app.get(
       return res
         .status(500)
         .json({
-          success:
-            false,
-
-          error:
-            "DASHBOARD_ERROR"
+          success: false,
+          error: "DASHBOARD_ERROR"
         });
+
     }
+
   }
 );
 
@@ -2770,14 +2455,10 @@ app.get(
 
   csrfProtection,
 
-  (
-    req,
-    res
-  ) => {
+  (req, res) => {
 
     res.send(`
 <!DOCTYPE html>
-
 <html>
 
 <head>
@@ -2803,7 +2484,6 @@ Device Management Console
 --border:#e5e7eb;
 --text:#111827;
 --muted:#6b7280;
---dark:#111827;
 --blue:#2563eb;
 --green:#15803d;
 --orange:#c2410c;
@@ -2813,13 +2493,7 @@ Device Management Console
 
 *{
 box-sizing:border-box;
-font-family:
-Inter,
-system-ui,
--apple-system,
-BlinkMacSystemFont,
-"Segoe UI",
-sans-serif;
+font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
 }
 
 body{
@@ -2898,10 +2572,7 @@ padding:18px;
 .stats{
 display:grid;
 grid-template-columns:
-repeat(
-auto-fit,
-minmax(180px,1fr)
-);
+repeat(auto-fit,minmax(180px,1fr));
 gap:14px;
 margin-bottom:18px;
 }
@@ -2944,9 +2615,7 @@ outline:none;
 input:focus,
 select:focus{
 border-color:#2563eb;
-box-shadow:
-0 0 0 3px
-rgba(37,99,235,.08);
+box-shadow:0 0 0 3px rgba(37,99,235,.08);
 }
 
 .search{
@@ -3133,14 +2802,11 @@ font-size:12px;
 color:#6b7280;
 }
 
-/* MODAL */
-
 .modal-overlay{
 display:none;
 position:fixed;
 inset:0;
-background:
-rgba(17,24,39,.55);
+background:rgba(17,24,39,.55);
 z-index:9999;
 padding:20px;
 align-items:center;
@@ -3152,9 +2818,7 @@ width:100%;
 max-width:900px;
 background:white;
 border-radius:12px;
-box-shadow:
-0 25px 60px
-rgba(0,0,0,.25);
+box-shadow:0 25px 60px rgba(0,0,0,.25);
 overflow:hidden;
 }
 
@@ -3215,10 +2879,13 @@ min-width:0;
 <div class="topbar">
 
 <div class="brand">
+
 Device Console
+
 <span>
 Administrator Panel
 </span>
+
 </div>
 
 <div class="top-actions">
@@ -3287,9 +2954,7 @@ class="search"
 placeholder="Search device ID, nickname or status"
 >
 
-<select
-id="filter"
->
+<select id="filter">
 
 <option value="all">
 All Time
@@ -3339,75 +3004,33 @@ Apply Filter
 <div class="stats">
 
 <div class="stat">
-<div class="stat-label">
-TOTAL DEVICES
-</div>
-<div
-class="stat-value"
-id="totalDevices"
->
--
-</div>
+<div class="stat-label">TOTAL DEVICES</div>
+<div class="stat-value" id="totalDevices">-</div>
 </div>
 
 <div class="stat">
-<div class="stat-label">
-APPROVED
-</div>
-<div
-class="stat-value"
-id="approved"
->
--
-</div>
+<div class="stat-label">APPROVED</div>
+<div class="stat-value" id="approved">-</div>
 </div>
 
 <div class="stat">
-<div class="stat-label">
-PENDING
-</div>
-<div
-class="stat-value"
-id="pending"
->
--
-</div>
+<div class="stat-label">PENDING</div>
+<div class="stat-value" id="pending">-</div>
 </div>
 
 <div class="stat">
-<div class="stat-label">
-BLOCKED
-</div>
-<div
-class="stat-value"
-id="blocked"
->
--
-</div>
+<div class="stat-label">BLOCKED</div>
+<div class="stat-value" id="blocked">-</div>
 </div>
 
 <div class="stat">
-<div class="stat-label">
-ONLINE NOW
-</div>
-<div
-class="stat-value"
-id="online"
->
--
-</div>
+<div class="stat-label">ONLINE NOW</div>
+<div class="stat-value" id="online">-</div>
 </div>
 
 <div class="stat">
-<div class="stat-label">
-TOTAL USAGE
-</div>
-<div
-class="stat-value"
-id="totalUsage"
->
--
-</div>
+<div class="stat-label">TOTAL USAGE</div>
+<div class="stat-value" id="totalUsage">-</div>
 </div>
 
 </div>
@@ -3421,9 +3044,7 @@ Usage Trend
 <div class="card-body">
 
 <div class="chart-wrap">
-<canvas
-id="usageChart"
-></canvas>
+<canvas id="usageChart"></canvas>
 </div>
 
 </div>
@@ -3444,51 +3065,27 @@ Device Permission Manager
 
 <tr>
 
-<th>
-Nickname
-</th>
-
-<th>
-Device ID
-</th>
-
-<th>
-Permission
-</th>
-
-<th>
-Live Status
-</th>
-
-<th>
-Usage
-</th>
-
-<th>
-Registered
-</th>
-
-<th>
-Actions
-</th>
+<th>Nickname</th>
+<th>Device ID</th>
+<th>Permission</th>
+<th>Live Status</th>
+<th>Usage</th>
+<th>Registered</th>
+<th>Actions</th>
 
 </tr>
 
 </thead>
 
-<tbody
-id="deviceTable"
->
+<tbody id="deviceTable">
 
 <tr>
-
 <td
 colspan="7"
 style="text-align:center;padding:25px"
 >
 Loading devices...
 </td>
-
 </tr>
 
 </tbody>
@@ -3499,21 +3096,15 @@ Loading devices...
 
 <div class="pagination">
 
-<button
-id="prevPage"
->
+<button id="prevPage">
 Previous
 </button>
 
-<span
-id="pageInfo"
->
+<span id="pageInfo">
 Page -
 </span>
 
-<button
-id="nextPage"
->
+<button id="nextPage">
 Next
 </button>
 
@@ -3522,8 +3113,6 @@ Next
 </div>
 
 </div>
-
-<!-- SESSION MODAL -->
 
 <div
 class="modal-overlay"
@@ -3534,15 +3123,11 @@ id="historyModal"
 
 <div class="modal-header">
 
-<div>
-
 <div
 class="modal-title"
 id="modalTitle"
 >
 Session History
-</div>
-
 </div>
 
 <button
@@ -3564,47 +3149,26 @@ onclick="closeModal()"
 
 <tr>
 
-<th>
-Started
-</th>
-
-<th>
-Last Seen
-</th>
-
-<th>
-Ended
-</th>
-
-<th>
-Duration
-</th>
-
-<th>
-Status
-</th>
-
-<th>
-End Reason
-</th>
+<th>Started</th>
+<th>Last Seen</th>
+<th>Ended</th>
+<th>Duration</th>
+<th>Status</th>
+<th>End Reason</th>
 
 </tr>
 
 </thead>
 
-<tbody
-id="historyTableBody"
->
+<tbody id="historyTableBody">
 
 <tr>
-
 <td
 colspan="6"
 style="text-align:center"
 >
 Loading...
 </td>
-
 </tr>
 
 </tbody>
@@ -3642,51 +3206,29 @@ document.getElementById(
 
 function escapeHTML(value){
 
-return String(
-value ?? ""
-)
+return String(value ?? "")
 
-.replace(
-/&/g,
-"&amp;"
-)
+.replace(/&/g,"&amp;")
 
-.replace(
-/</g,
-"&lt;"
-)
+.replace(/</g,"&lt;")
 
-.replace(
-/>/g,
-"&gt;"
-)
+.replace(/>/g,"&gt;")
 
-.replace(
-/"/g,
-"&quot;"
-)
+.replace(/"/g,"&quot;")
 
-.replace(
-/'/g,
-"&#039;"
-);
+.replace(/'/g,"&#039;");
 
 }
 
 async function refreshDashboard(){
 
-if(
-refreshInProgress
-){
+if(refreshInProgress){
 return;
 }
 
-refreshInProgress =
-true;
+refreshInProgress = true;
 
-clearTimeout(
-refreshTimer
-);
+clearTimeout(refreshTimer);
 
 try{
 
@@ -3698,38 +3240,22 @@ new URLSearchParams();
 
 params.set(
 "search",
-document
-.getElementById(
-"search"
-)
-.value
+document.getElementById("search").value
 );
 
 params.set(
 "filter",
-document
-.getElementById(
-"filter"
-)
-.value
+document.getElementById("filter").value
 );
 
 params.set(
 "from",
-document
-.getElementById(
-"from"
-)
-.value
+document.getElementById("from").value
 );
 
 params.set(
 "to",
-document
-.getElementById(
-"to"
-)
-.value
+document.getElementById("to").value
 );
 
 params.set(
@@ -3742,17 +3268,12 @@ await fetch(
 "/api/dashboard?" +
 params.toString(),
 {
-credentials:
-"same-origin",
-
-cache:
-"no-store"
+credentials:"same-origin",
+cache:"no-store"
 }
 );
 
-if(
-response.status === 401
-){
+if(response.status === 401){
 
 window.location.href =
 "/login";
@@ -3761,9 +3282,7 @@ return;
 
 }
 
-if(
-!response.ok
-){
+if(!response.ok){
 
 throw new Error(
 "Dashboard request failed"
@@ -3774,9 +3293,7 @@ throw new Error(
 const data =
 await response.json();
 
-if(
-!data.success
-){
+if(!data.success){
 
 throw new Error(
 "Dashboard API error"
@@ -3784,42 +3301,29 @@ throw new Error(
 
 }
 
-updateStats(
-data.stats
-);
+updateStats(data.stats);
 
-updateChart(
-data.chart
-);
+updateChart(data.chart);
 
-updateTable(
-data.devices
-);
+updateTable(data.devices);
 
-updatePagination(
-data.pagination
-);
+updatePagination(data.pagination);
 
 refreshStatus.textContent =
 "Last refreshed: " +
 new Date()
-.toLocaleTimeString(
-"en-IN"
-);
+.toLocaleTimeString("en-IN");
 
 }catch(error){
 
-console.error(
-error
-);
+console.error(error);
 
 refreshStatus.textContent =
 "Unable to refresh dashboard.";
 
 }finally{
 
-refreshInProgress =
-false;
+refreshInProgress = false;
 
 scheduleRefresh();
 
@@ -3835,46 +3339,34 @@ refreshDashboard();
 
 function updateStats(stats){
 
-document
-.getElementById(
+document.getElementById(
 "totalDevices"
-)
-.textContent =
+).textContent =
 stats.totalDevices;
 
-document
-.getElementById(
+document.getElementById(
 "approved"
-)
-.textContent =
+).textContent =
 stats.approved;
 
-document
-.getElementById(
+document.getElementById(
 "pending"
-)
-.textContent =
+).textContent =
 stats.pending;
 
-document
-.getElementById(
+document.getElementById(
 "blocked"
-)
-.textContent =
+).textContent =
 stats.blocked;
 
-document
-.getElementById(
+document.getElementById(
 "online"
-)
-.textContent =
+).textContent =
 stats.online;
 
-document
-.getElementById(
+document.getElementById(
 "totalUsage"
-)
-.textContent =
+).textContent =
 stats.totalUsage;
 
 }
@@ -3886,9 +3378,7 @@ document.getElementById(
 "usageChart"
 );
 
-if(
-chartInstance
-){
+if(chartInstance){
 
 chartInstance.destroy();
 
@@ -3899,15 +3389,16 @@ new Chart(
 canvas,
 {
 
-type:
-"line",
+type:"line",
 
 data:{
+
 labels:
 chart.labels,
 
 datasets:[
 {
+
 label:
 "Usage (minutes)",
 
@@ -3920,25 +3411,22 @@ borderColor:
 backgroundColor:
 "rgba(37,99,235,.08)",
 
-borderWidth:
-2,
+borderWidth:2,
 
-fill:
-true,
+fill:true,
 
-tension:
-.25
+tension:.25
+
 }
 ]
+
 },
 
 options:{
 
-responsive:
-true,
+responsive:true,
 
-maintainAspectRatio:
-false,
+maintainAspectRatio:false,
 
 plugins:{
 
@@ -3946,8 +3434,7 @@ legend:{
 
 labels:{
 
-color:
-"#374151"
+color:"#374151"
 
 }
 
@@ -3960,38 +3447,25 @@ scales:{
 x:{
 
 ticks:{
-
-color:
-"#6b7280"
-
+color:"#6b7280"
 },
 
 grid:{
-
-color:
-"#f3f4f6"
-
+color:"#f3f4f6"
 }
 
 },
 
 y:{
 
-beginAtZero:
-true,
+beginAtZero:true,
 
 ticks:{
-
-color:
-"#6b7280"
-
+color:"#6b7280"
 },
 
 grid:{
-
-color:
-"#f3f4f6"
-
+color:"#f3f4f6"
 }
 
 }
@@ -4012,9 +3486,7 @@ document.getElementById(
 "deviceTable"
 );
 
-if(
-!devices.length
-){
+if(!devices.length){
 
 tbody.innerHTML =
 '<tr><td colspan="7" style="text-align:center;padding:25px">No devices found.</td></tr>';
@@ -4060,11 +3532,11 @@ nickname +
 '">History</button>';
 
 if(
-device.status !==
-"approved"
+device.status !== "approved"
 ){
 
 actions +=
+
 '<form class="inline-form" method="POST" action="/action/approve">' +
 
 '<input type="hidden" name="_csrf" value="' +
@@ -4082,11 +3554,11 @@ deviceId +
 }
 
 if(
-device.status !==
-"blocked"
+device.status !== "blocked"
 ){
 
 actions +=
+
 '<form class="inline-form" method="POST" action="/action/block">' +
 
 '<input type="hidden" name="_csrf" value="' +
@@ -4104,11 +3576,11 @@ deviceId +
 }
 
 if(
-device.status !==
-"pending"
+device.status !== "pending"
 ){
 
 actions +=
+
 '<form class="inline-form" method="POST" action="/action/pending">' +
 
 '<input type="hidden" name="_csrf" value="' +
@@ -4126,6 +3598,7 @@ deviceId +
 }
 
 actions +=
+
 '<form class="inline-form" method="POST" action="/action/delete" onsubmit="return confirm(\\'Delete this device and all session history permanently?\\')">' +
 
 '<input type="hidden" name="_csrf" value="' +
@@ -4183,19 +3656,13 @@ liveText +
 '</span></td>' +
 
 '<td><strong>' +
-escapeHTML(
-device.usage
-) +
+escapeHTML(device.usage) +
 '</strong><br><span style="font-size:11px;color:#6b7280">' +
-Number(
-device.sessions
-) +
+Number(device.sessions) +
 ' sessions</span></td>' +
 
 '<td>' +
-escapeHTML(
-device.registeredAt
-) +
+escapeHTML(device.registeredAt) +
 '</td>' +
 
 '<td class="action-cell">' +
@@ -4221,6 +3688,7 @@ button.addEventListener(
 function(){
 
 openHistory(
+
 button.getAttribute(
 "data-history"
 ),
@@ -4277,22 +3745,14 @@ try{
 const response =
 await fetch(
 "/api/sessions/" +
-encodeURIComponent(
-deviceId
-),
+encodeURIComponent(deviceId),
 {
-credentials:
-"same-origin",
-
-cache:
-"no-store"
+credentials:"same-origin",
+cache:"no-store"
 }
 );
 
-if(
-response.status ===
-401
-){
+if(response.status === 401){
 
 window.location.href =
 "/login";
@@ -4321,8 +3781,7 @@ data.sessions.map(
 function(item){
 
 const statusClass =
-item.status ===
-"online"
+item.status === "online"
 ? "online"
 : "offline";
 
@@ -4331,43 +3790,31 @@ return (
 '<tr>' +
 
 '<td>' +
-escapeHTML(
-item.startTime
-) +
+escapeHTML(item.startTime) +
 '</td>' +
 
 '<td>' +
-escapeHTML(
-item.lastSeenTime
-) +
+escapeHTML(item.lastSeenTime) +
 '</td>' +
 
 '<td>' +
-escapeHTML(
-item.endTime
-) +
+escapeHTML(item.endTime) +
 '</td>' +
 
 '<td><strong>' +
-escapeHTML(
-item.duration
-) +
+escapeHTML(item.duration) +
 '</strong></td>' +
 
 '<td><span class="badge ' +
 statusClass +
 '">' +
 escapeHTML(
-String(
-item.status
-).toUpperCase()
+String(item.status).toUpperCase()
 ) +
 '</span></td>' +
 
 '<td>' +
-escapeHTML(
-item.endReason
-) +
+escapeHTML(item.endReason) +
 '</td>' +
 
 '</tr>'
@@ -4379,9 +3826,7 @@ item.endReason
 
 }catch(error){
 
-console.error(
-error
-);
+console.error(error);
 
 body.innerHTML =
 '<tr><td colspan="6" style="text-align:center;color:#b91c1c">Failed to load session history.</td></tr>';
@@ -4392,11 +3837,9 @@ body.innerHTML =
 
 function closeModal(){
 
-document
-.getElementById(
+document.getElementById(
 "historyModal"
-)
-.style.display =
+).style.display =
 "none";
 
 }
@@ -4410,10 +3853,7 @@ document.getElementById(
 "historyModal"
 );
 
-if(
-event.target ===
-modal
-){
+if(event.target === modal){
 
 closeModal();
 
@@ -4429,29 +3869,22 @@ pagination
 currentPage =
 pagination.page;
 
-document
-.getElementById(
+document.getElementById(
 "pageInfo"
-)
-.textContent =
+).textContent =
 "Page " +
 pagination.page +
 " of " +
 pagination.totalPages;
 
-document
-.getElementById(
+document.getElementById(
 "prevPage"
-)
-.disabled =
-pagination.page <=
-1;
+).disabled =
+pagination.page <= 1;
 
-document
-.getElementById(
+document.getElementById(
 "nextPage"
-)
-.disabled =
+).disabled =
 pagination.page >=
 pagination.totalPages;
 
@@ -4463,17 +3896,14 @@ clearTimeout(
 refreshTimer
 );
 
-if(
-document.hidden
-){
+if(document.hidden){
 return;
 }
 
 refreshTimer =
 setTimeout(
 refreshDashboard,
-REFRESH_SECONDS *
-1000
+REFRESH_SECONDS * 1000
 );
 
 }
@@ -4488,8 +3918,7 @@ function(event){
 
 event.preventDefault();
 
-currentPage =
-1;
+currentPage = 1;
 
 refreshDashboard();
 
@@ -4504,10 +3933,7 @@ document
 "click",
 function(){
 
-if(
-currentPage >
-1
-){
+if(currentPage > 1){
 
 currentPage--;
 
@@ -4537,9 +3963,7 @@ document.addEventListener(
 "visibilitychange",
 function(){
 
-if(
-document.hidden
-){
+if(document.hidden){
 
 clearTimeout(
 refreshTimer
@@ -4562,6 +3986,7 @@ refreshDashboard();
 
 </html>
 `);
+
   }
 );
 
@@ -4570,15 +3995,12 @@ refreshDashboard();
 ========================================================= */
 
 app.use(
-  (
-    req,
-    res
-  ) => {
+  (req, res) => {
+
     res
       .status(404)
-      .send(
-        "404 Not Found"
-      );
+      .send("404 Not Found");
+
   }
 );
 
@@ -4588,18 +4010,22 @@ app.use(
 
 let server = null;
 
-async function shutdown(
-  signal
-) {
+let shuttingDown = false;
+
+async function shutdown(signal) {
+
+  if (shuttingDown) {
+    return;
+  }
+
+  shuttingDown = true;
 
   console.log(
     signal +
     " received. Shutting down..."
   );
 
-  clearInterval(
-    cleanupInterval
-  );
+  clearInterval(cleanupInterval);
 
   try {
 
@@ -4607,9 +4033,9 @@ async function shutdown(
 
       await new Promise(
         (resolve) => {
-          server.close(
-            resolve
-          );
+
+          server.close(resolve);
+
         }
       );
 
@@ -4633,6 +4059,7 @@ async function shutdown(
     process.exit(1);
 
   }
+
 }
 
 process.on(
@@ -4662,20 +4089,69 @@ async function startServer() {
 
         socketTimeoutMS:
           45000
+
       }
     );
 
-    await Promise.all([
+    /*
+    Build indexes.
 
-      Device.init(),
+    If your existing database was created
+    with an old index name, MongoDB may
+    already have a valid unique deviceId
+    index. We log an index-name conflict
+    instead of killing the whole server.
+    */
 
-      UsageSession.init()
+    try {
 
-    ]);
+      await Device.init();
 
-    console.log(
-      "MongoDB indexes ready"
-    );
+      await UsageSession.init();
+
+      console.log(
+        "MongoDB indexes ready"
+      );
+
+    } catch (indexError) {
+
+      const message =
+        String(
+          indexError &&
+          indexError.message ||
+          ""
+        );
+
+      if (
+        indexError &&
+        (
+          indexError.code === 85 ||
+          indexError.codeName ===
+            "IndexOptionsConflict" ||
+          message.includes(
+            "already exists with a different name"
+          )
+        )
+      ) {
+
+        console.warn(
+          "MongoDB index warning:",
+          message
+        );
+
+        console.warn(
+          "Server continuing with existing database indexes."
+        );
+
+      } else {
+
+        throw indexError;
+
+      }
+
+    }
+
+    await markStaleSessionsOffline();
 
     server =
       app.listen(
@@ -4693,6 +4169,12 @@ async function startServer() {
             "ms"
           );
 
+          console.log(
+            "Cleanup interval: " +
+            CLEANUP_INTERVAL_MS +
+            "ms"
+          );
+
         }
       );
 
@@ -4706,6 +4188,7 @@ async function startServer() {
     process.exit(1);
 
   }
+
 }
 
 startServer();
