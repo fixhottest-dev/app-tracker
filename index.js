@@ -965,6 +965,7 @@ app.get("/", requireLogin, csrfProtection, (req, res) => {
 app.use((req, res) => { res.status(404).send("404 Not Found"); });
 
 /* =========================================================
+   /* =========================================================
    SHUTDOWN & STARTUP
 ========================================================= */
 let server = null;
@@ -985,7 +986,15 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 async function startServer() {
   try {
     await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 10000, socketTimeoutMS: 45000 });
+    
+    // 🔥 AUTO-MIGRATION FIX: Purane devices aur history ko naye Multi-App system ke kabil banayega
+    try { 
+      await Device.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
+      await UsageSession.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
+    } catch (e) { console.error("Migration error:", e.message); }
+
     try { await Device.init(); await UsageSession.init(); await Apk.init(); } catch (err) { }
+    
     console.log("MongoDB indexes ready");
     server = app.listen(PORT, () => { console.log("V6.3 Multi-App Console running on port " + PORT); });
   } catch (err) { console.error("FATAL STARTUP ERROR:", err.message); process.exit(1); }
