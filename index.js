@@ -14,7 +14,7 @@ const streamifier = require("streamifier");
 const app = express();
 
 /* =========================================================
-   V6.4.8 PRODUCTION EDITION (CSRF & MULTIPART FIX)
+   V6.4.9 PRODUCTION EDITION (PROGRESS & UPLOAD FIX)
 ========================================================= */
 
 const PORT = Number(process.env.PORT || 3000);
@@ -316,7 +316,7 @@ const UI_STYLES = `
 
 const TOPBAR_HTML = (csrfToken) => `
 <div class="topbar">
-  <div class="brand">Admin Console<span>V6.4.8 Production Edition</span></div>
+  <div class="brand">Admin Console<span>V6.4.9 Production Edition</span></div>
   <div style="display:flex;gap:8px;align-items:center;">
     <a href="/" class="btn btn-blue">Devices</a>
     <a href="/apps" class="btn btn-orange">App Systems</a>
@@ -437,7 +437,7 @@ app.post("/action/app-registry/delete", requireLogin, csrfProtection, async (req
 });
 
 /* =========================================================
-   APK MANAGER (WITH FILE UPLOAD FORM)
+   APK MANAGER (WITH FILE UPLOAD FORM & LOADING GUARD)
 ========================================================= */
 app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
   try {
@@ -483,7 +483,7 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
     return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>APK Manager</title>${UI_STYLES}</head>
       <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>APK Store Manager</h1></div>
       <div class="card"><div class="card-header">${formTitle} ${isEditing ? '<a href="/apks" class="btn btn-gray" style="float:right;padding:3px 8px;font-size:11px;">Cancel Edit</a>' : ''}</div><div class="card-body">
-      <form method="POST" action="${formAction}" enctype="multipart/form-data" style="display:grid;grid-template-columns:1fr 1fr;gap:15px;">
+      <form id="apkForm" method="POST" action="${formAction}" enctype="multipart/form-data" style="display:grid;grid-template-columns:1fr 1fr;gap:15px;">
         <input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}">
         ${isEditing ? `<input type="hidden" name="id" value="${editApk._id}"><input type="hidden" name="existingIconUrl" value="${escapeHtml(editApk.iconUrl || "")}"><input type="hidden" name="existingScreenshots" value="${escapeHtml(JSON.stringify(editApk.screenshots || []))}">` : ""}
         <div class="form-group"><label>App Name</label><input type="text" name="appName" required value="${isEditing ? escapeHtml(editApk.appName) : ""}" placeholder="Example App"></div>
@@ -495,7 +495,7 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
         <div class="form-group" style="grid-column:1/-1;">
           <label>Upload App Icon (Image File)</label>
           <input type="file" name="iconFile" accept="image/*">
-          ${isEditing && editApk.iconUrl ? `<br><small style="color:green;">Current Icon active</small>` : ""}
+          ${isEditing && editApk.iconUrl ? `<br><small style="color:green;">Current Icon active (Leave empty to keep existing)</small>` : ""}
         </div>
 
         <div class="form-group" style="grid-column:1/-1;">
@@ -504,11 +504,20 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
         </div>
 
         <div class="form-group" style="grid-column:1/-1;"><label>Changelog / Description</label><textarea name="description" rows="3">${isEditing ? escapeHtml(editApk.description || "") : ""}</textarea></div>
-        <div style="grid-column:1/-1;display:flex;gap:10px;"><button type="submit" class="btn ${isEditing ? 'btn-blue' : 'btn-green'}">${submitBtnText}</button>${isEditing ? '<a href="/apks" class="btn btn-gray">Cancel</a>' : ''}</div>
+        <div style="grid-column:1/-1;display:flex;gap:10px;"><button type="submit" id="submitBtn" class="btn ${isEditing ? 'btn-blue' : 'btn-green'}">${submitBtnText}</button>${isEditing ? '<a href="/apks" class="btn btn-gray">Cancel</a>' : ''}</div>
       </form></div></div>
       <div class="card"><div class="card-header">Published Apps</div><div class="table-wrap">
       <table><thead><tr><th>App</th><th>Version</th><th>Package</th><th>APK</th><th>Published</th><th>Action</th></tr></thead><tbody>${apkRows}</tbody></table>
-      </div></div></div></body></html>`);
+      </div></div></div>
+      <script>
+        document.getElementById("apkForm").addEventListener("submit", function(e) {
+          const btn = document.getElementById("submitBtn");
+          btn.disabled = true;
+          btn.style.opacity = "0.7";
+          btn.style.cursor = "not-allowed";
+          btn.innerHTML = "⏳ Uploading to Cloudinary... Please wait!";
+        });
+      </script></body></html>`);
   } catch (err) { 
     return res.status(500).send("Error: " + err.message); 
   }
@@ -539,8 +548,11 @@ app.post("/action/apk/add", requireLogin, upload.fields([{ name: 'iconFile', max
     if (appName && packageName && versionName && apkUrl) {
       await Apk.create({ appName, description, versionName, versionCode, packageName, apkUrl, iconUrl, screenshots });
     }
-  } catch (err) { console.error(err); } 
-  res.redirect("/apks");
+    return res.redirect("/apks");
+  } catch (err) { 
+    console.error("Add APK Error:", err); 
+    return res.status(500).send("Add Failed: " + err.message); 
+  }
 });
 
 app.post("/action/apk/edit", requireLogin, upload.fields([{ name: 'iconFile', maxCount: 1 }, { name: 'screenshotFiles', maxCount: 10 }]), csrfProtection, async (req, res) => {
@@ -575,8 +587,11 @@ app.post("/action/apk/edit", requireLogin, upload.fields([{ name: 'iconFile', ma
     if (mongoose.Types.ObjectId.isValid(id) && appName && packageName && versionName && apkUrl) {
       await Apk.findByIdAndUpdate(id, { appName, description, versionName, versionCode, packageName, apkUrl, iconUrl, screenshots });
     }
-  } catch (err) { console.error(err); } 
-  res.redirect("/apks");
+    return res.redirect("/apks");
+  } catch (err) { 
+    console.error("Edit APK Error:", err); 
+    return res.status(500).send("Edit Failed: " + err.message); 
+  }
 });
 
 app.post("/action/apk/delete", requireLogin, csrfProtection, async (req, res) => {
@@ -664,7 +679,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
 });
 
 app.get("/", requireLogin, csrfProtection, (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.8</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.9</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
     <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>Device Management</h1><p id="refreshStatus" class="status-line">Loading dashboard...</p></div>
     <div class="card"><div class="card-body"><form id="filterForm" class="filters"><input id="search" class="search" placeholder="Search device ID or nickname"><select id="appFilter"><option value="all">All Apps</option></select><select id="filter"><option value="all">All Time</option><option value="today">Today (IST)</option><option value="7d">Last 7 Days</option><option value="30d">Last 30 Days</option></select><button class="btn btn-blue" type="submit">Apply Filter</button><button type="button" class="btn btn-gray" onclick="manualRefresh()">Refresh</button></form>
     <div style="margin-top:12px;"><form method="POST" action="/action/device/clear-all-history" onsubmit="return confirm('WARNING: Permanently delete ALL session history for ALL apps?')"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><button type="submit" class="btn btn-red">Clear All History</button></form></div></div></div>
@@ -759,7 +774,7 @@ async function startServer() {
 
     try { await Device.init(); await UsageSession.init(); await Apk.init(); await AppRegistry.init(); } catch (err) { }
     
-    server = app.listen(PORT, () => { console.log("V6.4.8 Production Edition running on port " + PORT); });
+    server = app.listen(PORT, () => { console.log("V6.4.9 Production Edition running on port " + PORT); });
   } catch (err) { process.exit(1); }
 }
 startServer();
