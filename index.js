@@ -11,7 +11,7 @@ const crypto = require("crypto");
 const app = express();
 
 /* =========================================================
-   V6.4.2 PRODUCTION EDITION (WITH EDIT/MODIFY APK SUPPORT)
+   V6.4.3 PRODUCTION EDITION (WITH SCREENSHOTS ARRAY SUPPORT)
 ========================================================= */
 
 const PORT = Number(process.env.PORT || 3000);
@@ -111,6 +111,7 @@ const ApkSchema = new mongoose.Schema({
   packageName: { type: String, required: true, trim: true, maxlength: 200, index: true },
   apkUrl: { type: String, required: true, trim: true, maxlength: 500 },
   iconUrl: { type: String, default: "", trim: true, maxlength: 500 },
+  screenshots: { type: [String], default: [] }, // NEW: Feature screenshots array
   createdAt: { type: Date, default: Date.now, index: true }
 }, { versionKey: false });
 
@@ -124,6 +125,11 @@ const Apk = mongoose.model("Apk", ApkSchema);
 ========================================================= */
 function escapeHtml(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
 function safeString(value, maxLength) { return String(value || "").trim().substring(0, maxLength); }
+function parseScreenshots(input) {
+  if (!input) return [];
+  if (Array.isArray(input)) return input.map(s => String(s).trim()).filter(Boolean);
+  return String(input).split(",").map(s => s.trim()).filter(Boolean);
+}
 function formatDuration(ms) {
   const safeMs = Number(ms); if (!Number.isFinite(safeMs) || safeMs <= 0) return "0s";
   const totalSeconds = Math.floor(safeMs / 1000); const days = Math.floor(totalSeconds / 86400); const hours = Math.floor((totalSeconds % 86400) / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); const seconds = totalSeconds % 60;
@@ -287,7 +293,7 @@ const UI_STYLES = `
 
 const TOPBAR_HTML = (csrfToken) => `
 <div class="topbar">
-  <div class="brand">Admin Console<span>V6.4.2 Production Edition</span></div>
+  <div class="brand">Admin Console<span>V6.4.3 Production Edition</span></div>
   <div style="display:flex;gap:8px;align-items:center;">
     <a href="/" class="btn btn-blue">Devices</a>
     <a href="/apps" class="btn btn-orange">App Systems</a>
@@ -408,7 +414,7 @@ app.post("/action/app-registry/delete", requireLogin, csrfProtection, async (req
 });
 
 /* =========================================================
-   APK MANAGER (WITH EDIT & MODIFY SUPPORT)
+   APK MANAGER (WITH SCREENSHOTS FIELD SUPPORT)
 ========================================================= */
 app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
   try {
@@ -450,6 +456,7 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
     const formAction = isEditing ? `/action/apk/edit` : `/action/apk/add`;
     const formTitle = isEditing ? `Edit APK: ${escapeHtml(editApk.appName)}` : `Publish New APK`;
     const submitBtnText = isEditing ? `Update APK Details` : `Publish APK`;
+    const existingScreenshots = isEditing && Array.isArray(editApk.screenshots) ? editApk.screenshots.join(", ") : "";
 
     return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>APK Manager</title>${UI_STYLES}</head>
       <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>APK Store Manager</h1></div>
@@ -463,6 +470,7 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
         <div class="form-group"><label>Version Code</label><input type="number" name="versionCode" required value="${isEditing ? editApk.versionCode : ""}" placeholder="20"></div>
         <div class="form-group" style="grid-column:1/-1;"><label>Direct APK URL</label><input type="url" name="apkUrl" required value="${isEditing ? escapeHtml(editApk.apkUrl) : ""}" placeholder="https://example.com/app.apk"></div>
         <div class="form-group" style="grid-column:1/-1;"><label>App Icon Image URL (Logo)</label><input type="url" name="iconUrl" value="${isEditing ? escapeHtml(editApk.iconUrl || "") : ""}" placeholder="https://example.com/icon.png"></div>
+        <div class="form-group" style="grid-column:1/-1;"><label>Feature Screenshots URLs (Comma separated)</label><input type="text" name="screenshots" value="${escapeHtml(existingScreenshots)}" placeholder="https://img1.com/a.png, https://img2.com/b.png"></div>
         <div class="form-group" style="grid-column:1/-1;"><label>Changelog / Description</label><textarea name="description" rows="3">${isEditing ? escapeHtml(editApk.description || "") : ""}</textarea></div>
         <div style="grid-column:1/-1;display:flex;gap:10px;"><button type="submit" class="btn ${isEditing ? 'btn-blue' : 'btn-green'}">${submitBtnText}</button>${isEditing ? '<a href="/apks" class="btn btn-gray">Cancel</a>' : ''}</div>
       </form></div></div>
@@ -479,9 +487,10 @@ app.post("/action/apk/add", requireLogin, csrfProtection, async (req, res) => {
     const versionName = safeString(req.body.versionName, 50); 
     const apkUrl = safeString(req.body.apkUrl, 500);
     const iconUrl = safeString(req.body.iconUrl, 500);
+    const screenshots = parseScreenshots(req.body.screenshots);
     
     if (appName && packageName && versionName && apkUrl) {
-      await Apk.create({ appName, description: safeString(req.body.description, 500), versionName, versionCode: parseInt(req.body.versionCode, 10) || 1, packageName, apkUrl, iconUrl });
+      await Apk.create({ appName, description: safeString(req.body.description, 500), versionName, versionCode: parseInt(req.body.versionCode, 10) || 1, packageName, apkUrl, iconUrl, screenshots });
     }
   } catch (err) {} res.redirect("/apks");
 });
@@ -494,11 +503,12 @@ app.post("/action/apk/edit", requireLogin, csrfProtection, async (req, res) => {
     const versionName = safeString(req.body.versionName, 50); 
     const apkUrl = safeString(req.body.apkUrl, 500);
     const iconUrl = safeString(req.body.iconUrl, 500);
+    const screenshots = parseScreenshots(req.body.screenshots);
     const description = safeString(req.body.description, 500);
     const versionCode = parseInt(req.body.versionCode, 10) || 1;
 
     if (mongoose.Types.ObjectId.isValid(id) && appName && packageName && versionName && apkUrl) {
-      await Apk.findByIdAndUpdate(id, { appName, description, versionName, versionCode, packageName, apkUrl, iconUrl });
+      await Apk.findByIdAndUpdate(id, { appName, description, versionName, versionCode, packageName, apkUrl, iconUrl, screenshots });
     }
   } catch (err) {} res.redirect("/apks");
 });
@@ -588,7 +598,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
 });
 
 app.get("/", requireLogin, csrfProtection, (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.2</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.3</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
     <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>Device Management</h1><p id="refreshStatus" class="status-line">Loading dashboard...</p></div>
     <div class="card"><div class="card-body"><form id="filterForm" class="filters"><input id="search" class="search" placeholder="Search device ID or nickname"><select id="appFilter"><option value="all">All Apps</option></select><select id="filter"><option value="all">All Time</option><option value="today">Today (IST)</option><option value="7d">Last 7 Days</option><option value="30d">Last 30 Days</option></select><button class="btn btn-blue" type="submit">Apply Filter</button><button type="button" class="btn btn-gray" onclick="manualRefresh()">Refresh</button></form>
     <div style="margin-top:12px;"><form method="POST" action="/action/device/clear-all-history" onsubmit="return confirm('WARNING: Permanently delete ALL session history for ALL apps?')"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><button type="submit" class="btn btn-red">Clear All History</button></form></div></div></div>
@@ -679,11 +689,11 @@ async function startServer() {
       for (const appId of distinctAppIds) {
         await AppRegistry.updateOne({ appId }, { $setOnInsert: { appId, appName: appId } }, { upsert: true }).catch(() => {});
       }
-    } catch (e) {}
+    }
+  } catch (e) {}
 
-    try { await Device.init(); await UsageSession.init(); await Apk.init(); await AppRegistry.init(); } catch (err) { }
-    
-    server = app.listen(PORT, () => { console.log("V6.4.2 Production Edition running on port " + PORT); });
-  } catch (err) { process.exit(1); }
+  try { await Device.init(); await UsageSession.init(); await Apk.init(); await AppRegistry.init(); } catch (err) { }
+  
+  server = app.listen(PORT, () => { console.log("V6.4.3 Production Edition running on port " + PORT); });
 }
 startServer();
