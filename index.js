@@ -14,7 +14,7 @@ const streamifier = require("streamifier");
 const app = express();
 
 /* =========================================================
-   V6.4.9 PRODUCTION EDITION (PROGRESS & UPLOAD FIX)
+   V6.4.9 PRODUCTION EDITION (OPTIMIZED & BUG FIXED)
 ========================================================= */
 
 const PORT = Number(process.env.PORT || 3000);
@@ -37,8 +37,11 @@ try {
   console.error("Cloudinary config error:", e);
 }
 
-
-const upload = multer({ storage: multer.memoryStorage() });
+// FIX: Added 5MB limit to prevent RAM crashes (OOM)
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 } 
+});
 
 function uploadToCloudinary(buffer, folderName = "rd_store") {
   return new Promise((resolve, reject) => {
@@ -68,7 +71,8 @@ if (!MONGO_URI) { console.error("FATAL: MONGO_URI is missing."); process.exit(1)
 if (!ADMIN_PASSWORD && !ADMIN_PASSWORD_HASH) { console.error("FATAL: ADMIN_PASSWORD or ADMIN_PASSWORD_HASH is required."); process.exit(1); }
 if (IS_PRODUCTION && !SESSION_SECRET) { console.error("FATAL: SESSION_SECRET is required in production."); process.exit(1); }
 
-app.set("trust proxy", 1);
+// FIX: Set to true for proper Render Proxy handling
+app.set("trust proxy", true);
 app.disable("x-powered-by");
 app.use(express.urlencoded({ extended: true, limit: "100kb" }));
 app.use(express.json({ limit: "100kb" }));
@@ -237,6 +241,9 @@ cleanupInterval.unref();
 /* =========================================================
    TRACKING API
 ========================================================= */
+// FIX: Cache to reduce database load
+const knownApps = new Set();
+
 async function handleTracking(req, res) {
   const deviceId = safeString(req.query.id || req.body?.id, MAX_DEVICE_ID_LENGTH);
   const appId = safeString(req.query.appId || req.body?.appId, MAX_APP_ID_LENGTH) || "default_app";
@@ -249,7 +256,11 @@ async function handleTracking(req, res) {
   if (mongoose.connection.readyState !== 1) return res.status(503).json({ status: "ERROR", message: "DATABASE_OFFLINE" });
 
   try {
-    await AppRegistry.updateOne({ appId }, { $setOnInsert: { appId, appName: appId } }, { upsert: true }).catch(() => {});
+    // FIX: Using Set to prevent unnecessary DB updates every 15 secs
+    if (!knownApps.has(appId)) {
+      await AppRegistry.updateOne({ appId }, { $setOnInsert: { appId, appName: appId } }, { upsert: true }).catch(() => {});
+      knownApps.add(appId);
+    }
 
     let device = await Device.findOne({ deviceId, appId });
     if (!device) {
@@ -408,7 +419,7 @@ app.post("/action/app-registry/add", requireLogin, csrfProtection, async (req, r
   try {
     const appId = safeString(req.body.appId, MAX_APP_ID_LENGTH); const appName = safeString(req.body.appName, 100);
     if (appId && appName) await AppRegistry.create({ appId, appName });
-  } catch (err) {}
+  } catch (err) { console.error("Add App Error:", err); }
   res.redirect("/apps");
 });
 
@@ -423,7 +434,7 @@ app.post("/action/app-registry/edit", requireLogin, csrfProtection, async (req, 
         await UsageSession.updateMany({ appId: oldAppId }, { $set: { appId: newAppId } });
       }
     }
-  } catch (err) {} res.redirect("/apps");
+  } catch (err) { console.error("Edit App Error:", err); } res.redirect("/apps");
 });
 
 app.post("/action/app-registry/delete", requireLogin, csrfProtection, async (req, res) => {
@@ -434,7 +445,7 @@ app.post("/action/app-registry/delete", requireLogin, csrfProtection, async (req
       await Device.deleteMany({ appId });
       await UsageSession.deleteMany({ appId });
     }
-  } catch (err) {} res.redirect("/apps");
+  } catch (err) { console.error("Delete App Error:", err); } res.redirect("/apps");
 });
 
 /* =========================================================
@@ -596,7 +607,7 @@ app.post("/action/apk/edit", requireLogin, upload.fields([{ name: 'iconFile', ma
 });
 
 app.post("/action/apk/delete", requireLogin, csrfProtection, async (req, res) => {
-  try { const id = safeString(req.body.id, 100); if (mongoose.Types.ObjectId.isValid(id)) await Apk.findByIdAndDelete(id); } catch (err) {} res.redirect("/apks");
+  try { const id = safeString(req.body.id, 100); if (mongoose.Types.ObjectId.isValid(id)) await Apk.findByIdAndDelete(id); } catch (err) { console.error("Delete APK Error:", err); } res.redirect("/apks");
 });
 
 app.post("/action/device/:type", requireLogin, csrfProtection, async (req, res) => {
@@ -610,7 +621,7 @@ app.post("/action/device/:type", requireLogin, csrfProtection, async (req, res) 
     if (type === "clear-history") await UsageSession.deleteMany({ deviceId, appId });
     if (type === "delete") { await Promise.all([ Device.deleteOne({ deviceId, appId }), UsageSession.deleteMany({ deviceId, appId }) ]); }
     if (type === "clear-all-history") await UsageSession.deleteMany({});
-  } catch (err) {} res.redirect("/");
+  } catch (err) { console.error("Device Action Error:", err); } res.redirect("/");
 });
 
 /* =========================================================
@@ -773,7 +784,17 @@ async function startServer() {
       }
     } catch (e) {}
 
-    try { await Device.init(); await UsageSession.init(); await Apk.init(); await AppRegistry.init(); } catch (err) { }
+    // FIX: Using syncIndexes() to clear out old legacy duplicate key rules (E11000 bug fix)
+    try { 
+      console.log("Syncing database indexes...");
+      await Device.syncIndexes(); 
+      await UsageSession.syncIndexes(); 
+      await Apk.syncIndexes(); 
+      await AppRegistry.syncIndexes(); 
+      console.log("Indexes synced perfectly!");
+    } catch (err) { 
+      console.error("Index sync error:", err);
+    }
     
     server = app.listen(PORT, () => { console.log("V6.4.9 Production Edition running on port " + PORT); });
   } catch (err) { process.exit(1); }
