@@ -7,11 +7,14 @@ const session = require("express-session");
 const MongoStore = require("connect-mongo");
 const rateLimit = require("express-rate-limit");
 const crypto = require("crypto");
+const multer = require("multer");
+const cloudinary = require("cloudinary").v2;
+const streamifier = require("streamifier");
 
 const app = express();
 
 /* =========================================================
-   V6.4.4 PRODUCTION EDITION (STABLE BUILD FIX)
+   V6.4.5 PRODUCTION EDITION (WITH CLOUDINARY FILE UPLOAD)
 ========================================================= */
 
 const PORT = Number(process.env.PORT || 3000);
@@ -23,6 +26,28 @@ const NODE_ENV = process.env.NODE_ENV || "development";
 const IS_PRODUCTION = NODE_ENV === "production";
 const SESSION_SECRET = process.env.SESSION_SECRET || (!IS_PRODUCTION ? crypto.randomBytes(48).toString("hex") : "");
 const REDIRECT_URL = process.env.REDIRECT_URL || "https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app";
+
+// Cloudinary Configuration
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+function uploadToCloudinary(buffer, folderName = "rd_store") {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { folder: folderName, resource_type: "auto" },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result.secure_url);
+      }
+    );
+    streamifier.createReadStream(buffer).pipe(uploadStream);
+  });
+}
 
 const ONLINE_TIMEOUT_MS = Number(process.env.ONLINE_TIMEOUT_MS || 45000);
 const CLEANUP_INTERVAL_MS = Number(process.env.CLEANUP_INTERVAL_MS || 15000);
@@ -125,37 +150,6 @@ const Apk = mongoose.model("Apk", ApkSchema);
 ========================================================= */
 function escapeHtml(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
 function safeString(value, maxLength) { return String(value || "").trim().substring(0, maxLength); }
-function parseScreenshots(input) {
-  if (!input) return [];
-  if (Array.isArray(input)) return input.map(s => String(s).trim()).filter(Boolean);
-  return String(input).split(",").map(s => s.trim()).filter(Boolean);
-}
-function formatDuration(ms) {
-  const safeMs = Number(ms); if (!Number.isFinite(safeMs) || safeMs <= 0) return "0s";
-  const totalSeconds = Math.floor(safeMs / 1000); const days = Math.floor(totalSeconds / 86400); const hours = Math.floor((totalSeconds % 86400) / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); const seconds = totalSeconds % 60;
-  const parts = []; if (days > 0) parts.push(days + "d"); if (hours > 0) parts.push(hours + "h"); if (minutes > 0) parts.push(minutes + "m"); if (seconds > 0 || parts.length === 0) parts.push(seconds + "s"); return parts.join(" ");
-}
-function safeDate(value) {
-  if (!value) return "N/A"; const date = new Date(value); if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "medium", hour12: true });
-}
-function getISTStartOfDay() {
-  const now = new Date(); const formatter = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" });
-  const parts = formatter.formatToParts(now); const values = {}; parts.forEach((part) => { if (part.type !== "literal") values[part.type] = part.value; });
-  return Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day), 0, 0, 0) - (5.5 * 60 * 60 * 1000);
-}
-function getRange(filter, customFrom, customTo) {
-  const now = Date.now(); let from = null; let to = now;
-  if (filter === "today") from = getISTStartOfDay();
-  if (filter === "7d") from = now - (7 * 24 * 60 * 60 * 1000);
-  if (filter === "30d") from = now - (30 * 24 * 60 * 60 * 1000);
-  if (filter === "custom") {
-    if (customFrom) { const parsed = new Date(customFrom + "T00:00:00+05:30"); if (!Number.isNaN(parsed.getTime())) from = parsed.getTime(); }
-    if (customTo) { const parsed = new Date(customTo + "T23:59:59.999+05:30"); if (!Number.isNaN(parsed.getTime())) to = parsed.getTime(); }
-  }
-  if (from !== null && from > to) { const temp = from; from = to; to = temp; }
-  return { from, to };
-}
 
 /* =========================================================
    AUTH & CSRF
@@ -293,7 +287,7 @@ const UI_STYLES = `
 
 const TOPBAR_HTML = (csrfToken) => `
 <div class="topbar">
-  <div class="brand">Admin Console<span>V6.4.4 Production Edition</span></div>
+  <div class="brand">Admin Console<span>V6.4.5 Production Edition</span></div>
   <div style="display:flex;gap:8px;align-items:center;">
     <a href="/" class="btn btn-blue">Devices</a>
     <a href="/apps" class="btn btn-orange">App Systems</a>
@@ -414,7 +408,7 @@ app.post("/action/app-registry/delete", requireLogin, csrfProtection, async (req
 });
 
 /* =========================================================
-   APK MANAGER
+   APK MANAGER (WITH FILE UPLOAD FORM)
 ========================================================= */
 app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
   try {
@@ -456,21 +450,30 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
     const formAction = isEditing ? `/action/apk/edit` : `/action/apk/add`;
     const formTitle = isEditing ? `Edit APK: ${escapeHtml(editApk.appName)}` : `Publish New APK`;
     const submitBtnText = isEditing ? `Update APK Details` : `Publish APK`;
-    const existingScreenshots = isEditing && Array.isArray(editApk.screenshots) ? editApk.screenshots.join(", ") : "";
 
     return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>APK Manager</title>${UI_STYLES}</head>
       <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>APK Store Manager</h1></div>
       <div class="card"><div class="card-header">${formTitle} ${isEditing ? '<a href="/apks" class="btn btn-gray" style="float:right;padding:3px 8px;font-size:11px;">Cancel Edit</a>' : ''}</div><div class="card-body">
-      <form method="POST" action="${formAction}" style="display:grid;grid-template-columns:1fr 1fr;gap:15px;">
+      <form method="POST" action="${formAction}" enctype="multipart/form-data" style="display:grid;grid-template-columns:1fr 1fr;gap:15px;">
         <input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}">
-        ${isEditing ? `<input type="hidden" name="id" value="${editApk._id}">` : ""}
+        ${isEditing ? `<input type="hidden" name="id" value="${editApk._id}"><input type="hidden" name="existingIconUrl" value="${escapeHtml(editApk.iconUrl || "")}"><input type="hidden" name="existingScreenshots" value="${escapeHtml(JSON.stringify(editApk.screenshots || []))}">` : ""}
         <div class="form-group"><label>App Name</label><input type="text" name="appName" required value="${isEditing ? escapeHtml(editApk.appName) : ""}" placeholder="Example App"></div>
         <div class="form-group"><label>Package Name</label><input type="text" name="packageName" required value="${isEditing ? escapeHtml(editApk.packageName) : ""}" placeholder="com.example.app"></div>
         <div class="form-group"><label>Version Name</label><input type="text" name="versionName" required value="${isEditing ? escapeHtml(editApk.versionName) : ""}" placeholder="2.0"></div>
         <div class="form-group"><label>Version Code</label><input type="number" name="versionCode" required value="${isEditing ? editApk.versionCode : ""}" placeholder="20"></div>
         <div class="form-group" style="grid-column:1/-1;"><label>Direct APK URL</label><input type="url" name="apkUrl" required value="${isEditing ? escapeHtml(editApk.apkUrl) : ""}" placeholder="https://example.com/app.apk"></div>
-        <div class="form-group" style="grid-column:1/-1;"><label>App Icon Image URL (Logo)</label><input type="url" name="iconUrl" value="${isEditing ? escapeHtml(editApk.iconUrl || "") : ""}" placeholder="https://example.com/icon.png"></div>
-        <div class="form-group" style="grid-column:1/-1;"><label>Feature Screenshots URLs (Comma separated)</label><input type="text" name="screenshots" value="${escapeHtml(existingScreenshots)}" placeholder="https://img1.com/a.png, https://img2.com/b.png"></div>
+        
+        <div class="form-group" style="grid-column:1/-1;">
+          <label>Upload App Icon (Image File)</label>
+          <input type="file" name="iconFile" accept="image/*">
+          ${isEditing && editApk.iconUrl ? `<br><small style="color:green;">Current Icon active</small>` : ""}
+        </div>
+
+        <div class="form-group" style="grid-column:1/-1;">
+          <label>Upload Feature Screenshots (Multiple files allowed)</label>
+          <input type="file" name="screenshotFiles" accept="image/*" multiple>
+        </div>
+
         <div class="form-group" style="grid-column:1/-1;"><label>Changelog / Description</label><textarea name="description" rows="3">${isEditing ? escapeHtml(editApk.description || "") : ""}</textarea></div>
         <div style="grid-column:1/-1;display:flex;gap:10px;"><button type="submit" class="btn ${isEditing ? 'btn-blue' : 'btn-green'}">${submitBtnText}</button>${isEditing ? '<a href="/apks" class="btn btn-gray">Cancel</a>' : ''}</div>
       </form></div></div>
@@ -480,32 +483,62 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
   } catch (err) { return res.status(500).send("Error"); }
 });
 
-app.post("/action/apk/add", requireLogin, csrfProtection, async (req, res) => {
+app.post("/action/apk/add", requireLogin, csrfProtection, upload.fields([{ name: 'iconFile', maxCount: 1 }, { name: 'screenshotFiles', maxCount: 10 }]), async (req, res) => {
   try {
     const appName = safeString(req.body.appName, 100); 
     const packageName = safeString(req.body.packageName, 200); 
     const versionName = safeString(req.body.versionName, 50); 
     const apkUrl = safeString(req.body.apkUrl, 500);
-    const iconUrl = safeString(req.body.iconUrl, 500);
-    const screenshots = parseScreenshots(req.body.screenshots);
+    const description = safeString(req.body.description, 500);
+    const versionCode = parseInt(req.body.versionCode, 10) || 1;
+
+    let iconUrl = "";
+    if (req.files && req.files.iconFile && req.files.iconFile[0]) {
+      iconUrl = await uploadToCloudinary(req.files.iconFile[0].buffer, "rd_store/icons");
+    }
+
+    let screenshots = [];
+    if (req.files && req.files.screenshotFiles) {
+      for (const file of req.files.screenshotFiles) {
+        const url = await uploadToCloudinary(file.buffer, "rd_store/screenshots");
+        screenshots.push(url);
+      }
+    }
     
     if (appName && packageName && versionName && apkUrl) {
-      await Apk.create({ appName, description: safeString(req.body.description, 500), versionName, versionCode: parseInt(req.body.versionCode, 10) || 1, packageName, apkUrl, iconUrl, screenshots });
+      await Apk.create({ appName, description, versionName, versionCode, packageName, apkUrl, iconUrl, screenshots });
     }
   } catch (err) {} res.redirect("/apks");
 });
 
-app.post("/action/apk/edit", requireLogin, csrfProtection, async (req, res) => {
+app.post("/action/apk/edit", requireLogin, csrfProtection, upload.fields([{ name: 'iconFile', maxCount: 1 }, { name: 'screenshotFiles', maxCount: 10 }]), async (req, res) => {
   try {
     const id = safeString(req.body.id, 100);
     const appName = safeString(req.body.appName, 100); 
     const packageName = safeString(req.body.packageName, 200); 
     const versionName = safeString(req.body.versionName, 50); 
     const apkUrl = safeString(req.body.apkUrl, 500);
-    const iconUrl = safeString(req.body.iconUrl, 500);
-    const screenshots = parseScreenshots(req.body.screenshots);
     const description = safeString(req.body.description, 500);
     const versionCode = parseInt(req.body.versionCode, 10) || 1;
+
+    let iconUrl = req.body.existingIconUrl || "";
+    if (req.files && req.files.iconFile && req.files.iconFile[0]) {
+      iconUrl = await uploadToCloudinary(req.files.iconFile[0].buffer, "rd_store/icons");
+    }
+
+    let screenshots = [];
+    try {
+      if (req.body.existingScreenshots) {
+        screenshots = JSON.parse(req.body.existingScreenshots);
+      }
+    } catch(e) {}
+
+    if (req.files && req.files.screenshotFiles) {
+      for (const file of req.files.screenshotFiles) {
+        const url = await uploadToCloudinary(file.buffer, "rd_store/screenshots");
+        screenshots.push(url);
+      }
+    }
 
     if (mongoose.Types.ObjectId.isValid(id) && appName && packageName && versionName && apkUrl) {
       await Apk.findByIdAndUpdate(id, { appName, description, versionName, versionCode, packageName, apkUrl, iconUrl, screenshots });
@@ -598,7 +631,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
 });
 
 app.get("/", requireLogin, csrfProtection, (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.4</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.5</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
     <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>Device Management</h1><p id="refreshStatus" class="status-line">Loading dashboard...</p></div>
     <div class="card"><div class="card-body"><form id="filterForm" class="filters"><input id="search" class="search" placeholder="Search device ID or nickname"><select id="appFilter"><option value="all">All Apps</option></select><select id="filter"><option value="all">All Time</option><option value="today">Today (IST)</option><option value="7d">Last 7 Days</option><option value="30d">Last 30 Days</option></select><button class="btn btn-blue" type="submit">Apply Filter</button><button type="button" class="btn btn-gray" onclick="manualRefresh()">Refresh</button></form>
     <div style="margin-top:12px;"><form method="POST" action="/action/device/clear-all-history" onsubmit="return confirm('WARNING: Permanently delete ALL session history for ALL apps?')"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><button type="submit" class="btn btn-red">Clear All History</button></form></div></div></div>
@@ -693,7 +726,7 @@ async function startServer() {
 
     try { await Device.init(); await UsageSession.init(); await Apk.init(); await AppRegistry.init(); } catch (err) { }
     
-    server = app.listen(PORT, () => { console.log("V6.4.4 Production Edition running on port " + PORT); });
+    server = app.listen(PORT, () => { console.log("V6.4.5 Production Edition running on port " + PORT); });
   } catch (err) { process.exit(1); }
 }
 startServer();
