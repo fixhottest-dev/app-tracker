@@ -11,7 +11,7 @@ const crypto = require("crypto");
 const app = express();
 
 /* =========================================================
-   V6.4.3 PRODUCTION EDITION (WITH SCREENSHOTS ARRAY SUPPORT)
+   V6.4.4 PRODUCTION EDITION (STABLE BUILD FIX)
 ========================================================= */
 
 const PORT = Number(process.env.PORT || 3000);
@@ -111,7 +111,7 @@ const ApkSchema = new mongoose.Schema({
   packageName: { type: String, required: true, trim: true, maxlength: 200, index: true },
   apkUrl: { type: String, required: true, trim: true, maxlength: 500 },
   iconUrl: { type: String, default: "", trim: true, maxlength: 500 },
-  screenshots: { type: [String], default: [] }, // NEW: Feature screenshots array
+  screenshots: { type: [String], default: [] },
   createdAt: { type: Date, default: Date.now, index: true }
 }, { versionKey: false });
 
@@ -293,7 +293,7 @@ const UI_STYLES = `
 
 const TOPBAR_HTML = (csrfToken) => `
 <div class="topbar">
-  <div class="brand">Admin Console<span>V6.4.3 Production Edition</span></div>
+  <div class="brand">Admin Console<span>V6.4.4 Production Edition</span></div>
   <div style="display:flex;gap:8px;align-items:center;">
     <a href="/" class="btn btn-blue">Devices</a>
     <a href="/apps" class="btn btn-orange">App Systems</a>
@@ -414,7 +414,7 @@ app.post("/action/app-registry/delete", requireLogin, csrfProtection, async (req
 });
 
 /* =========================================================
-   APK MANAGER (WITH SCREENSHOTS FIELD SUPPORT)
+   APK MANAGER
 ========================================================= */
 app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
   try {
@@ -598,7 +598,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
 });
 
 app.get("/", requireLogin, csrfProtection, (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.3</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.4</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
     <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>Device Management</h1><p id="refreshStatus" class="status-line">Loading dashboard...</p></div>
     <div class="card"><div class="card-body"><form id="filterForm" class="filters"><input id="search" class="search" placeholder="Search device ID or nickname"><select id="appFilter"><option value="all">All Apps</option></select><select id="filter"><option value="all">All Time</option><option value="today">Today (IST)</option><option value="7d">Last 7 Days</option><option value="30d">Last 30 Days</option></select><button class="btn btn-blue" type="submit">Apply Filter</button><button type="button" class="btn btn-gray" onclick="manualRefresh()">Refresh</button></form>
     <div style="margin-top:12px;"><form method="POST" action="/action/device/clear-all-history" onsubmit="return confirm('WARNING: Permanently delete ALL session history for ALL apps?')"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><button type="submit" class="btn btn-red">Clear All History</button></form></div></div></div>
@@ -689,11 +689,11 @@ async function startServer() {
       for (const appId of distinctAppIds) {
         await AppRegistry.updateOne({ appId }, { $setOnInsert: { appId, appName: appId } }, { upsert: true }).catch(() => {});
       }
-    }
-  } catch (e) {}
+    } catch (e) {}
 
-  try { await Device.init(); await UsageSession.init(); await Apk.init(); await AppRegistry.init(); } catch (err) { }
-  
-  server = app.listen(PORT, () => { console.log("V6.4.3 Production Edition running on port " + PORT); });
+    try { await Device.init(); await UsageSession.init(); await Apk.init(); await AppRegistry.init(); } catch (err) { }
+    
+    server = app.listen(PORT, () => { console.log("V6.4.4 Production Edition running on port " + PORT); });
+  } catch (err) { process.exit(1); }
 }
 startServer();
