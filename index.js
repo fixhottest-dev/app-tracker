@@ -11,7 +11,7 @@ const crypto = require("crypto");
 const app = express();
 
 /* =========================================================
-   V6.4 MULTI-APP MANAGEMENT CONSOLE (WITH APP MANAGER)
+   V6.4.1 PRODUCTION EDITION (WITH ICON URL SUPPORT)
 ========================================================= */
 
 const PORT = Number(process.env.PORT || 3000);
@@ -71,7 +71,6 @@ const apiLimiter = rateLimit({ windowMs: 60 * 1000, max: 100, standardHeaders: t
    DATABASE SCHEMAS
 ========================================================= */
 
-// NEW: App Registry Schema for managing workspaces/apps
 const AppRegistrySchema = new mongoose.Schema({
   appId: { type: String, required: true, unique: true, index: true, trim: true, maxlength: MAX_APP_ID_LENGTH },
   appName: { type: String, required: true, trim: true, maxlength: 100 },
@@ -104,6 +103,7 @@ SessionSchema.index({ deviceId: 1, appId: 1, startTimestamp: -1 });
 SessionSchema.index({ status: 1, lastSeenTimestamp: 1 });
 SessionSchema.index({ deviceId: 1, appId: 1 }, { unique: true, partialFilterExpression: { status: "online" }, name: "unique_online_session_per_device_app" });
 
+// UPDATED: Added iconUrl field for production app store UI
 const ApkSchema = new mongoose.Schema({
   appName: { type: String, required: true, trim: true, maxlength: 100 },
   description: { type: String, default: "", trim: true, maxlength: 500 },
@@ -111,6 +111,7 @@ const ApkSchema = new mongoose.Schema({
   versionCode: { type: Number, required: true, index: true },
   packageName: { type: String, required: true, trim: true, maxlength: 200, index: true },
   apkUrl: { type: String, required: true, trim: true, maxlength: 500 },
+  iconUrl: { type: String, default: "", trim: true, maxlength: 500 },
   createdAt: { type: Date, default: Date.now, index: true }
 }, { versionKey: false });
 
@@ -219,7 +220,6 @@ async function handleTracking(req, res) {
   if (mongoose.connection.readyState !== 1) return res.status(503).json({ status: "ERROR", message: "DATABASE_OFFLINE" });
 
   try {
-    // Auto-register App if missing
     await AppRegistry.updateOne({ appId }, { $setOnInsert: { appId, appName: appId } }, { upsert: true }).catch(() => {});
 
     let device = await Device.findOne({ deviceId, appId });
@@ -257,9 +257,12 @@ async function handleTracking(req, res) {
 app.get(["/track", "/index.php"], trackingLimiter, handleTracking);
 app.post(["/track", "/index.php"], trackingLimiter, handleTracking);
 
+// UPDATED API: Now returns iconUrl to the client app store
 app.get("/api/updates", apiLimiter, async (req, res) => {
-  try { const apks = await Apk.find().sort({ createdAt: -1 }).select("-_id -createdAt").lean(); return res.status(200).json(apks); } 
-  catch (err) { return res.status(500).json({ error: "Failed to fetch updates" }); }
+  try { 
+    const apks = await Apk.find().sort({ createdAt: -1 }).select("-_id -createdAt").lean(); 
+    return res.status(200).json(apks); 
+  } catch (err) { return res.status(500).json({ error: "Failed to fetch updates" }); }
 });
 
 /* =========================================================
@@ -287,7 +290,7 @@ const UI_STYLES = `
 
 const TOPBAR_HTML = (csrfToken) => `
 <div class="topbar">
-  <div class="brand">Admin Console<span>V6.4 Ultimate Panel</span></div>
+  <div class="brand">Admin Console<span>V6.4.1 Production Edition</span></div>
   <div style="display:flex;gap:8px;align-items:center;">
     <a href="/" class="btn btn-blue">Devices</a>
     <a href="/apps" class="btn btn-orange">App Systems</a>
@@ -323,7 +326,7 @@ app.post("/login", loginLimiter, csrfProtection, async (req, res) => {
 app.post("/logout", requireLogin, csrfProtection, (req, res) => { req.session.destroy(() => { res.clearCookie("admin.sid"); res.redirect("/login"); }); });
 
 /* =========================================================
-   APP MANAGER (NEW ROUTE)
+   APP MANAGER
 ========================================================= */
 app.get("/apps", requireLogin, csrfProtection, async (req, res) => {
   try {
@@ -408,23 +411,69 @@ app.post("/action/app-registry/delete", requireLogin, csrfProtection, async (req
 });
 
 /* =========================================================
-   APK & DEVICE ACTIONS
+   APK & DEVICE ACTIONS (UPDATED WITH ICON URL INPUT)
 ========================================================= */
 app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
   try {
     const apks = await Apk.find().sort({ createdAt: -1 }).lean();
-    let apkRows = apks.map((apk) => `<tr><td><strong>${escapeHtml(apk.appName)}</strong><br><span class="status-line">${escapeHtml(apk.description)}</span></td><td><span class="badge online">${escapeHtml(apk.versionName)}</span><br>Code: ${escapeHtml(apk.versionCode)}</td><td><code>${escapeHtml(apk.packageName)}</code></td><td><a href="${escapeHtml(apk.apkUrl)}" target="_blank" rel="noopener" style="color:var(--blue);font-size:12px;">Download</a></td><td>${safeDate(apk.createdAt)}</td><td><form class="inline-form" method="POST" action="/action/apk/delete" onsubmit="return confirm('Delete this APK from the store?')"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><input type="hidden" name="id" value="${escapeHtml(apk._id)}"><button class="btn btn-red" type="submit">Delete</button></form></td></tr>`).join("");
+    let apkRows = apks.map((apk) => `
+      <tr>
+        <td>
+          <div style="display:flex;align-items:center;gap:10px;">
+            ${apk.iconUrl ? `<img src="${escapeHtml(apk.iconUrl)}" style="width:36px;height:36px;border-radius:8px;object-fit:cover;" alt="icon">` : '<div style="width:36px;height:36px;border-radius:8px;background:#e5e7eb;"></div>'}
+            <div><strong>${escapeHtml(apk.appName)}</strong><br><span class="status-line">${escapeHtml(apk.description)}</span></div>
+          </div>
+        </td>
+        <td><span class="badge online">${escapeHtml(apk.versionName)}</span><br>Code: ${escapeHtml(apk.versionCode)}</td>
+        <td><code>${escapeHtml(apk.packageName)}</code></td>
+        <td><a href="${escapeHtml(apk.apkUrl)}" target="_blank" rel="noopener" style="color:var(--blue);font-size:12px;">Download</a></td>
+        <td>${safeDate(apk.createdAt)}</td>
+        <td>
+          <form class="inline-form" method="POST" action="/action/apk/delete" onsubmit="return confirm('Delete this APK from the store?')">
+            <input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}">
+            <input type="hidden" name="id" value="${escapeHtml(apk._id)}">
+            <button class="btn btn-red" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+    `).join("");
+
     if (!apkRows) apkRows = `<tr><td colspan="6" style="text-align:center;padding:25px;">No APKs published yet.</td></tr>`;
-    return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>APK Manager</title>${UI_STYLES}</head><body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>APK Store Manager</h1></div><div class="card"><div class="card-header">Publish New APK</div><div class="card-body"><form method="POST" action="/action/apk/add" style="display:grid;grid-template-columns:1fr 1fr;gap:15px;"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><div class="form-group"><label>App Name</label><input type="text" name="appName" required placeholder="Example App"></div><div class="form-group"><label>Package Name</label><input type="text" name="packageName" required placeholder="com.example.app"></div><div class="form-group"><label>Version Name</label><input type="text" name="versionName" required placeholder="2.0"></div><div class="form-group"><label>Version Code</label><input type="number" name="versionCode" required placeholder="20"></div><div class="form-group" style="grid-column:1/-1;"><label>Direct APK URL</label><input type="url" name="apkUrl" required placeholder="https://example.com/app.apk"></div><div class="form-group" style="grid-column:1/-1;"><label>Changelog</label><textarea name="description" rows="3"></textarea></div><div style="grid-column:1/-1;"><button type="submit" class="btn btn-green">Publish APK</button></div></form></div></div><div class="card"><div class="card-header">Published Apps</div><div class="table-wrap"><table><thead><tr><th>App</th><th>Version</th><th>Package</th><th>APK</th><th>Published</th><th>Action</th></tr></thead><tbody>${apkRows}</tbody></table></div></div></div></body></html>`);
+    
+    return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>APK Manager</title>${UI_STYLES}</head>
+      <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>APK Store Manager</h1></div>
+      <div class="card"><div class="card-header">Publish New APK</div><div class="card-body">
+      <form method="POST" action="/action/apk/add" style="display:grid;grid-template-columns:1fr 1fr;gap:15px;">
+        <input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}">
+        <div class="form-group"><label>App Name</label><input type="text" name="appName" required placeholder="Example App"></div>
+        <div class="form-group"><label>Package Name</label><input type="text" name="packageName" required placeholder="com.example.app"></div>
+        <div class="form-group"><label>Version Name</label><input type="text" name="versionName" required placeholder="2.0"></div>
+        <div class="form-group"><label>Version Code</label><input type="number" name="versionCode" required placeholder="20"></div>
+        <div class="form-group" style="grid-column:1/-1;"><label>Direct APK URL</label><input type="url" name="apkUrl" required placeholder="https://example.com/app.apk"></div>
+        <div class="form-group" style="grid-column:1/-1;"><label>App Icon Image URL (Logo)</label><input type="url" name="iconUrl" placeholder="https://example.com/icon.png"></div>
+        <div class="form-group" style="grid-column:1/-1;"><label>Changelog / Description</label><textarea name="description" rows="3"></textarea></div>
+        <div style="grid-column:1/-1;"><button type="submit" class="btn btn-green">Publish APK</button></div>
+      </form></div></div>
+      <div class="card"><div class="card-header">Published Apps</div><div class="table-wrap">
+      <table><thead><tr><th>App</th><th>Version</th><th>Package</th><th>APK</th><th>Published</th><th>Action</th></tr></thead><tbody>${apkRows}</tbody></table>
+      </div></div></div></body></html>`);
   } catch (err) { return res.status(500).send("Error"); }
 });
 
 app.post("/action/apk/add", requireLogin, csrfProtection, async (req, res) => {
   try {
-    const appName = safeString(req.body.appName, 100); const packageName = safeString(req.body.packageName, 200); const versionName = safeString(req.body.versionName, 50); const apkUrl = safeString(req.body.apkUrl, 500);
-    if (appName && packageName && versionName && apkUrl) await Apk.create({ appName, description: safeString(req.body.description, 500), versionName, versionCode: parseInt(req.body.versionCode, 10) || 1, packageName, apkUrl });
+    const appName = safeString(req.body.appName, 100); 
+    const packageName = safeString(req.body.packageName, 200); 
+    const versionName = safeString(req.body.versionName, 50); 
+    const apkUrl = safeString(req.body.apkUrl, 500);
+    const iconUrl = safeString(req.body.iconUrl, 500);
+    
+    if (appName && packageName && versionName && apkUrl) {
+      await Apk.create({ appName, description: safeString(req.body.description, 500), versionName, versionCode: parseInt(req.body.versionCode, 10) || 1, packageName, apkUrl, iconUrl });
+    }
   } catch (err) {} res.redirect("/apks");
 });
+
 app.post("/action/apk/delete", requireLogin, csrfProtection, async (req, res) => {
   try { const id = safeString(req.body.id, 100); if (mongoose.Types.ObjectId.isValid(id)) await Apk.findByIdAndDelete(id); } catch (err) {} res.redirect("/apks");
 });
@@ -510,7 +559,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
 });
 
 app.get("/", requireLogin, csrfProtection, (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.1</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
     <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>Device Management</h1><p id="refreshStatus" class="status-line">Loading dashboard...</p></div>
     <div class="card"><div class="card-body"><form id="filterForm" class="filters"><input id="search" class="search" placeholder="Search device ID or nickname"><select id="appFilter"><option value="all">All Apps</option></select><select id="filter"><option value="all">All Time</option><option value="today">Today (IST)</option><option value="7d">Last 7 Days</option><option value="30d">Last 30 Days</option></select><button class="btn btn-blue" type="submit">Apply Filter</button><button type="button" class="btn btn-gray" onclick="manualRefresh()">Refresh</button></form>
     <div style="margin-top:12px;"><form method="POST" action="/action/device/clear-all-history" onsubmit="return confirm('WARNING: Permanently delete ALL session history for ALL apps?')"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><button type="submit" class="btn btn-red">Clear All History</button></form></div></div></div>
@@ -578,7 +627,7 @@ app.get("/", requireLogin, csrfProtection, (req, res) => {
 app.use((req, res) => { res.status(404).send("404 Not Found"); });
 
 /* =========================================================
-   SHUTDOWN & STARTUP (WITH SAFE MIGRATION)
+   SHUTDOWN & STARTUP
 ========================================================= */
 let server = null;
 async function shutdown(signal) {
@@ -593,7 +642,6 @@ async function startServer() {
   try {
     await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 10000, socketTimeoutMS: 45000 });
     
-    // SAFE MIGRATION: Purane missing IDs ko 'default_app' me register kar do
     try {
       await Device.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
       await UsageSession.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
@@ -606,7 +654,7 @@ async function startServer() {
 
     try { await Device.init(); await UsageSession.init(); await Apk.init(); await AppRegistry.init(); } catch (err) { }
     
-    server = app.listen(PORT, () => { console.log("V6.4 Ultimate Edition running on port " + PORT); });
+    server = app.listen(PORT, () => { console.log("V6.4.1 Production Edition running on port " + PORT); });
   } catch (err) { process.exit(1); }
 }
 startServer();
