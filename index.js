@@ -14,7 +14,7 @@ const streamifier = require("streamifier");
 const app = express();
 
 /* =========================================================
-   V6.4.5 PRODUCTION EDITION (WITH CLOUDINARY FILE UPLOAD)
+   V6.4.6 PRODUCTION EDITION (DEBUG & ERROR TRACE)
 ========================================================= */
 
 const PORT = Number(process.env.PORT || 3000);
@@ -28,11 +28,15 @@ const SESSION_SECRET = process.env.SESSION_SECRET || (!IS_PRODUCTION ? crypto.ra
 const REDIRECT_URL = process.env.REDIRECT_URL || "https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app";
 
 // Cloudinary Configuration
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
+try {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
+  });
+} catch(e) {
+  console.error("Cloudinary config error:", e);
+}
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -287,7 +291,7 @@ const UI_STYLES = `
 
 const TOPBAR_HTML = (csrfToken) => `
 <div class="topbar">
-  <div class="brand">Admin Console<span>V6.4.5 Production Edition</span></div>
+  <div class="brand">Admin Console<span>V6.4.6 Production Edition</span></div>
   <div style="display:flex;gap:8px;align-items:center;">
     <a href="/" class="btn btn-blue">Devices</a>
     <a href="/apps" class="btn btn-orange">App Systems</a>
@@ -371,7 +375,7 @@ app.get("/apps", requireLogin, csrfProtection, async (req, res) => {
       <div class="card"><div class="card-header">Existing Systems</div><div class="table-wrap">
         <table style="min-width:600px;"><thead><tr><th>Rename & Edit Package</th><th>Registered Devices</th><th>Danger Zone</th></tr></thead><tbody>${rows}</tbody></table>
       </div></div></div></body></html>`);
-  } catch (err) { res.status(500).send("Error loading apps"); }
+  } catch (err) { res.status(500).send("Error: " + err.message); }
 });
 
 app.post("/action/app-registry/add", requireLogin, csrfProtection, async (req, res) => {
@@ -480,7 +484,9 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
       <div class="card"><div class="card-header">Published Apps</div><div class="table-wrap">
       <table><thead><tr><th>App</th><th>Version</th><th>Package</th><th>APK</th><th>Published</th><th>Action</th></tr></thead><tbody>${apkRows}</tbody></table>
       </div></div></div></body></html>`);
-  } catch (err) { return res.status(500).send("Error"); }
+  } catch (err) { 
+    return res.status(500).send("Error: " + err.message); 
+  }
 });
 
 app.post("/action/apk/add", requireLogin, csrfProtection, upload.fields([{ name: 'iconFile', maxCount: 1 }, { name: 'screenshotFiles', maxCount: 10 }]), async (req, res) => {
@@ -508,7 +514,8 @@ app.post("/action/apk/add", requireLogin, csrfProtection, upload.fields([{ name:
     if (appName && packageName && versionName && apkUrl) {
       await Apk.create({ appName, description, versionName, versionCode, packageName, apkUrl, iconUrl, screenshots });
     }
-  } catch (err) {} res.redirect("/apks");
+  } catch (err) { console.error(err); } 
+  res.redirect("/apks");
 });
 
 app.post("/action/apk/edit", requireLogin, csrfProtection, upload.fields([{ name: 'iconFile', maxCount: 1 }, { name: 'screenshotFiles', maxCount: 10 }]), async (req, res) => {
@@ -543,7 +550,8 @@ app.post("/action/apk/edit", requireLogin, csrfProtection, upload.fields([{ name
     if (mongoose.Types.ObjectId.isValid(id) && appName && packageName && versionName && apkUrl) {
       await Apk.findByIdAndUpdate(id, { appName, description, versionName, versionCode, packageName, apkUrl, iconUrl, screenshots });
     }
-  } catch (err) {} res.redirect("/apks");
+  } catch (err) { console.error(err); } 
+  res.redirect("/apks");
 });
 
 app.post("/action/apk/delete", requireLogin, csrfProtection, async (req, res) => {
@@ -631,7 +639,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
 });
 
 app.get("/", requireLogin, csrfProtection, (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.5</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.6</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
     <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>Device Management</h1><p id="refreshStatus" class="status-line">Loading dashboard...</p></div>
     <div class="card"><div class="card-body"><form id="filterForm" class="filters"><input id="search" class="search" placeholder="Search device ID or nickname"><select id="appFilter"><option value="all">All Apps</option></select><select id="filter"><option value="all">All Time</option><option value="today">Today (IST)</option><option value="7d">Last 7 Days</option><option value="30d">Last 30 Days</option></select><button class="btn btn-blue" type="submit">Apply Filter</button><button type="button" class="btn btn-gray" onclick="manualRefresh()">Refresh</button></form>
     <div style="margin-top:12px;"><form method="POST" action="/action/device/clear-all-history" onsubmit="return confirm('WARNING: Permanently delete ALL session history for ALL apps?')"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><button type="submit" class="btn btn-red">Clear All History</button></form></div></div></div>
@@ -726,7 +734,7 @@ async function startServer() {
 
     try { await Device.init(); await UsageSession.init(); await Apk.init(); await AppRegistry.init(); } catch (err) { }
     
-    server = app.listen(PORT, () => { console.log("V6.4.5 Production Edition running on port " + PORT); });
+    server = app.listen(PORT, () => { console.log("V6.4.6 Production Edition running on port " + PORT); });
   } catch (err) { process.exit(1); }
 }
 startServer();
