@@ -14,7 +14,7 @@ const streamifier = require("streamifier");
 const app = express();
 
 /* =========================================================
-   V6.4.6 PRODUCTION EDITION (DEBUG & ERROR TRACE)
+   V6.4.7 PRODUCTION EDITION (SAFEDATE FIX)
 ========================================================= */
 
 const PORT = Number(process.env.PORT || 3000);
@@ -27,7 +27,6 @@ const IS_PRODUCTION = NODE_ENV === "production";
 const SESSION_SECRET = process.env.SESSION_SECRET || (!IS_PRODUCTION ? crypto.randomBytes(48).toString("hex") : "");
 const REDIRECT_URL = process.env.REDIRECT_URL || "https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app";
 
-// Cloudinary Configuration
 try {
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -154,6 +153,32 @@ const Apk = mongoose.model("Apk", ApkSchema);
 ========================================================= */
 function escapeHtml(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
 function safeString(value, maxLength) { return String(value || "").trim().substring(0, maxLength); }
+function safeDate(value) {
+  if (!value) return "N/A"; const date = new Date(value); if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "medium", hour12: true });
+}
+function formatDuration(ms) {
+  const safeMs = Number(ms); if (!Number.isFinite(safeMs) || safeMs <= 0) return "0s";
+  const totalSeconds = Math.floor(safeMs / 1000); const days = Math.floor(totalSeconds / 86400); const hours = Math.floor((totalSeconds % 86400) / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); const seconds = totalSeconds % 60;
+  const parts = []; if (days > 0) parts.push(days + "d"); if (hours > 0) parts.push(hours + "h"); if (minutes > 0) parts.push(minutes + "m"); if (seconds > 0 || parts.length === 0) parts.push(seconds + "s"); return parts.join(" ");
+}
+function getISTStartOfDay() {
+  const now = new Date(); const formatter = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" });
+  const parts = formatter.formatToParts(now); const values = {}; parts.forEach((part) => { if (part.type !== "literal") values[part.type] = part.value; });
+  return Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day), 0, 0, 0) - (5.5 * 60 * 60 * 1000);
+}
+function getRange(filter, customFrom, customTo) {
+  const now = Date.now(); let from = null; let to = now;
+  if (filter === "today") from = getISTStartOfDay();
+  if (filter === "7d") from = now - (7 * 24 * 60 * 60 * 1000);
+  if (filter === "30d") from = now - (30 * 24 * 60 * 60 * 1000);
+  if (filter === "custom") {
+    if (customFrom) { const parsed = new Date(customFrom + "T00:00:00+05:30"); if (!Number.isNaN(parsed.getTime())) from = parsed.getTime(); }
+    if (customTo) { const parsed = new Date(customTo + "T23:59:59.999+05:30"); if (!Number.isNaN(parsed.getTime())) to = parsed.getTime(); }
+  }
+  if (from !== null && from > to) { const temp = from; from = to; to = temp; }
+  return { from, to };
+}
 
 /* =========================================================
    AUTH & CSRF
@@ -291,7 +316,7 @@ const UI_STYLES = `
 
 const TOPBAR_HTML = (csrfToken) => `
 <div class="topbar">
-  <div class="brand">Admin Console<span>V6.4.6 Production Edition</span></div>
+  <div class="brand">Admin Console<span>V6.4.7 Production Edition</span></div>
   <div style="display:flex;gap:8px;align-items:center;">
     <a href="/" class="btn btn-blue">Devices</a>
     <a href="/apps" class="btn btn-orange">App Systems</a>
@@ -639,7 +664,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
 });
 
 app.get("/", requireLogin, csrfProtection, (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.6</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.4.7</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
     <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>Device Management</h1><p id="refreshStatus" class="status-line">Loading dashboard...</p></div>
     <div class="card"><div class="card-body"><form id="filterForm" class="filters"><input id="search" class="search" placeholder="Search device ID or nickname"><select id="appFilter"><option value="all">All Apps</option></select><select id="filter"><option value="all">All Time</option><option value="today">Today (IST)</option><option value="7d">Last 7 Days</option><option value="30d">Last 30 Days</option></select><button class="btn btn-blue" type="submit">Apply Filter</button><button type="button" class="btn btn-gray" onclick="manualRefresh()">Refresh</button></form>
     <div style="margin-top:12px;"><form method="POST" action="/action/device/clear-all-history" onsubmit="return confirm('WARNING: Permanently delete ALL session history for ALL apps?')"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><button type="submit" class="btn btn-red">Clear All History</button></form></div></div></div>
@@ -734,7 +759,7 @@ async function startServer() {
 
     try { await Device.init(); await UsageSession.init(); await Apk.init(); await AppRegistry.init(); } catch (err) { }
     
-    server = app.listen(PORT, () => { console.log("V6.4.6 Production Edition running on port " + PORT); });
+    server = app.listen(PORT, () => { console.log("V6.4.7 Production Edition running on port " + PORT); });
   } catch (err) { process.exit(1); }
 }
 startServer();
