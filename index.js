@@ -14,7 +14,7 @@ const streamifier = require("streamifier");
 const app = express();
 
 /* =========================================================
-   V6.5.0 PRODUCTION EDITION (BUG FIXED)
+   V6.5.0 PRODUCTION EDITION (FULLY BUG FIXED)
    - Existing device/session dashboard preserved
    - Strict APK metadata validation
    - APK SHA-256 + signing certificate SHA-256 support
@@ -143,7 +143,6 @@ const adminActionLimiter = rateLimit({
 
 /* =========================================================
    UPLOADS
-   5MB per file; total number of files is bounded.
 ========================================================= */
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -226,14 +225,11 @@ const ApkSchema = new mongoose.Schema({
   apkUrl: { type: String, required: true, trim: true, maxlength: MAX_URL_LENGTH },
   iconUrl: { type: String, default: "", trim: true, maxlength: MAX_URL_LENGTH },
   screenshots: { type: [String], default: [] },
-  // SHA-256 of the complete APK file, lowercase 64 hex characters.
   apkSha256: { type: String, default: "", trim: true, lowercase: true, maxlength: MAX_HASH_LENGTH },
-  // SHA-256 fingerprint of the APK signing certificate, lowercase 64 hex characters.
   signatureSha256: { type: String, default: "", trim: true, lowercase: true, maxlength: MAX_HASH_LENGTH },
   createdAt: { type: Date, default: Date.now, index: true }
 }, { versionKey: false });
 
-// Lookup index for package/version history. Duplicate publication is blocked at the application layer.
 ApkSchema.index({ packageName: 1, versionCode: -1, createdAt: -1 }, { name: "apk_package_version_history" });
 
 const AppRegistry = mongoose.model("AppRegistry", AppRegistrySchema);
@@ -255,7 +251,7 @@ function escapeHtml(value) {
 function safeString(value, maxLength) {
   return String(value ?? "").trim().substring(0, maxLength);
 }
-// FIX: Relaxed regex to allow legacy package names (without dots)
+// Relaxed regex to allow legacy package names (without dots)
 function isValidPackageName(value) {
   return /^[A-Za-z][A-Za-z0-9_\.]*$/.test(String(value || ""));
 }
@@ -577,7 +573,7 @@ app.get("/api/updates", apiLimiter, async (req, res) => {
   try {
     const apks = await Apk.find()
       .sort({ packageName: 1, versionCode: -1, createdAt: -1 })
-      .select("-_id -createdAt") // FIX: Removed the space that was crashing the API
+      .select("-_id -createdAt") // Space removed to prevent API crash
       .lean();
     return res.status(200).json(apks);
   } catch (err) {
@@ -747,7 +743,6 @@ app.post("/action/app-registry/delete", requireLogin, adminActionLimiter, csrfPr
 ========================================================= */
 function apkFormFields(editApk, csrfToken) {
   const isEditing = !!editApk;
-  // FIX: Removed unnecessary hidden inputs existingApkSha256 and existingSignatureSha256 for a cleaner form
   return `
     <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}">
     ${isEditing ? `<input type="hidden" name="id" value="${escapeHtml(editApk._id)}"><input type="hidden" name="existingIconUrl" value="${escapeHtml(editApk.iconUrl || "")}"><input type="hidden" name="existingScreenshots" value="${escapeHtml(JSON.stringify(editApk.screenshots || []))}">` : ""}
@@ -1108,7 +1103,7 @@ async function refreshDashboard(){if(refreshInProgress)return;refreshInProgress=
 function manualRefresh(){refreshDashboard();}
 function updateAppDropdown(apps){const s=document.getElementById("appFilter");const v=s.value;s.innerHTML='<option value="all">All Apps</option>';(apps||[]).forEach(function(app){if(app&&app.appId){const o=document.createElement("option");o.value=app.appId;o.textContent=app.appName+" ("+app.appId+")";if(app.appId===v)o.selected=true;s.appendChild(o);}});}
 function updateStats(stats){document.getElementById("totalDevices").textContent=stats.totalDevices;document.getElementById("approved").textContent=stats.approved;document.getElementById("pending").textContent=stats.pending;document.getElementById("blocked").textContent=stats.blocked;document.getElementById("online").textContent=stats.online;document.getElementById("totalUsage").textContent=stats.totalUsage;}
-function updateTable(devices){const tbody=document.getElementById("deviceTable");if(!devices.length){tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:25px">No devices found.</td></tr>';return;}tbody.innerHTML=devices.map(function(device){const deviceId=escapeHTML(device.deviceId);const appId=escapeHTML(device.appId);const nickname=escapeHTML(device.nickname);const status=escapeHTML(device.status);const liveClass=device.online?"online":"offline";const liveText=device.online?"ONLINE":"OFFLINE";let actions='<button type="button" class="btn btn-purple" data-history="'+deviceId+'" data-app="'+appId+'">History</button>';actions+='<form class="inline-form" method="POST" action="/action/device/clear-history"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><button class="btn btn-red" type="submit">Clear History</button></form>';if(device.status!=="approved")actions+='<form class="inline-form" method="POST" action="/action/device/approve"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><button class="btn btn-green" type="submit">Approve</button></form>';if(device.status!=="blocked")actions+='<form class="inline-form" method="POST" action="/action/device/block"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><button class="btn btn-orange" type="submit">Block</button></form>';if(device.status!=="pending")actions+='<form class="inline-form" method="POST" action="/action/device/pending"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><button class="btn btn-yellow" type="submit">Pending</button></form>';actions+='<form class="inline-form" method="POST" action="/action/device/delete" onsubmit="return confirm(\'Delete device and its history?\')"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><button class="btn btn-red" type="submit">Delete Device</button></form>';return '<tr><td><form class="inline-form" method="POST" action="/action/device/nickname"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><input class="nickname-input" name="nickname" maxlength="50" placeholder="Nickname" value="'+nickname+'"><button class="btn btn-blue" type="submit">Save</button></form></td><td><code>'+deviceId+'</code><br><span class="badge badge-app">'+appId+'</span></td><td><span class="badge '+status+'">'+status.toUpperCase()+'</span></td><td><span class="badge '+liveClass+'">'+liveText+'</span></td><td><strong>'+escapeHTML(device.usage)+'</strong><br><span style="font-size:11px;color:#6b7280">'+Number(device.sessions)+' sessions</span></td><td>'+escapeHTML(device.registeredAt)+'</td><td class="action-cell">'+actions+'</td></tr>';}).join("");document.querySelectorAll("[data-history]").forEach(function(btn){btn.addEventListener("click",function(){openHistory(btn.getAttribute("data-history"),btn.getAttribute("data-app"));});});}
+function updateTable(devices){const tbody=document.getElementById("deviceTable");if(!devices.length){tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:25px">No devices found.</td></tr>';return;}tbody.innerHTML=devices.map(function(device){const deviceId=escapeHTML(device.deviceId);const appId=escapeHTML(device.appId);const nickname=escapeHTML(device.nickname);const status=escapeHTML(device.status);const liveClass=device.online?"online":"offline";const liveText=device.online?"ONLINE":"OFFLINE";let actions='<button type="button" class="btn btn-purple" data-history="'+deviceId+'" data-app="'+appId+'">History</button>';actions+='<form class="inline-form" method="POST" action="/action/device/clear-history"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><button class="btn btn-red" type="submit">Clear History</button></form>';if(device.status!=="approved")actions+='<form class="inline-form" method="POST" action="/action/device/approve"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><button class="btn btn-green" type="submit">Approve</button></form>';if(device.status!=="blocked")actions+='<form class="inline-form" method="POST" action="/action/device/block"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><button class="btn btn-orange" type="submit">Block</button></form>';if(device.status!=="pending")actions+='<form class="inline-form" method="POST" action="/action/device/pending"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><button class="btn btn-yellow" type="submit">Pending</button></form>';actions+='<form class="inline-form" method="POST" action="/action/device/delete" onsubmit="return confirm(&quot;Delete device and its history?&quot;)"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><button class="btn btn-red" type="submit">Delete Device</button></form>';return '<tr><td><form class="inline-form" method="POST" action="/action/device/nickname"><input type="hidden" name="_csrf" value="'+csrfToken+'"><input type="hidden" name="deviceId" value="'+deviceId+'"><input type="hidden" name="appId" value="'+appId+'"><input class="nickname-input" name="nickname" maxlength="50" placeholder="Nickname" value="'+nickname+'"><button class="btn btn-blue" type="submit">Save</button></form></td><td><code>'+deviceId+'</code><br><span class="badge badge-app">'+appId+'</span></td><td><span class="badge '+status+'">'+status.toUpperCase()+'</span></td><td><span class="badge '+liveClass+'">'+liveText+'</span></td><td><strong>'+escapeHTML(device.usage)+'</strong><br><span style="font-size:11px;color:#6b7280">'+Number(device.sessions)+' sessions</span></td><td>'+escapeHTML(device.registeredAt)+'</td><td class="action-cell">'+actions+'</td></tr>';}).join("");document.querySelectorAll("[data-history]").forEach(function(btn){btn.addEventListener("click",function(){openHistory(btn.getAttribute("data-history"),btn.getAttribute("data-app"));});});}
 async function openHistory(deviceId,appId){const modal=document.getElementById("historyModal");const title=document.getElementById("modalTitle");const body=document.getElementById("historyTableBody");title.textContent="History — "+deviceId+" ("+appId+")";body.innerHTML='<tr><td colspan="6" style="text-align:center">Loading...</td></tr>';modal.style.display="flex";try{const response=await fetch("/api/sessions/"+encodeURIComponent(deviceId)+"?appId="+encodeURIComponent(appId),{credentials:"same-origin",cache:"no-store"});if(response.status===401){window.location.href="/login";return;}if(!response.ok)throw new Error("HTTP "+response.status);const data=await response.json();if(!data.success||!data.sessions.length){body.innerHTML='<tr><td colspan="6" style="text-align:center">No session history available.</td></tr>';return;}body.innerHTML=data.sessions.map(function(item){const statusClass=item.status==="online"?"online":"offline";return '<tr><td>'+escapeHTML(item.startTime)+'</td><td>'+escapeHTML(item.lastSeenTime)+'</td><td>'+escapeHTML(item.endTime)+'</td><td><strong>'+escapeHTML(item.duration)+'</strong></td><td><span class="badge '+statusClass+'">'+escapeHTML(String(item.status).toUpperCase())+'</span></td><td>'+escapeHTML(item.endReason)+'</td></tr>';}).join("");}catch(error){body.innerHTML='<tr><td colspan="6" style="text-align:center;color:#b91c1c">Failed to load session history.</td></tr>';}}
 function closeModal(){document.getElementById("historyModal").style.display="none";}window.addEventListener("click",function(event){if(event.target===document.getElementById("historyModal"))closeModal();});
 function updatePagination(p){currentPage=p.page;document.getElementById("pageInfo").textContent="Page "+p.page+" of "+p.totalPages;document.getElementById("prevPage").disabled=p.page<=1;document.getElementById("nextPage").disabled=p.page>=p.totalPages;}
