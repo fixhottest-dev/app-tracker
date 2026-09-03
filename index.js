@@ -14,7 +14,7 @@ const streamifier = require("streamifier");
 const app = express();
 
 /* =========================================================
-   V6.5.0 PRODUCTION EDITION
+   V6.5.0 PRODUCTION EDITION (BUG FIXED)
    - Existing device/session dashboard preserved
    - Strict APK metadata validation
    - APK SHA-256 + signing certificate SHA-256 support
@@ -255,8 +255,9 @@ function escapeHtml(value) {
 function safeString(value, maxLength) {
   return String(value ?? "").trim().substring(0, maxLength);
 }
+// FIX: Relaxed regex to allow legacy package names (without dots)
 function isValidPackageName(value) {
-  return /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(String(value || ""));
+  return /^[A-Za-z][A-Za-z0-9_\.]*$/.test(String(value || ""));
 }
 function isValidAppId(value) {
   const s = String(value || "").trim();
@@ -576,7 +577,7 @@ app.get("/api/updates", apiLimiter, async (req, res) => {
   try {
     const apks = await Apk.find()
       .sort({ packageName: 1, versionCode: -1, createdAt: -1 })
-      .select("- _id -createdAt")
+      .select("-_id -createdAt") // FIX: Removed the space that was crashing the API
       .lean();
     return res.status(200).json(apks);
   } catch (err) {
@@ -746,11 +747,12 @@ app.post("/action/app-registry/delete", requireLogin, adminActionLimiter, csrfPr
 ========================================================= */
 function apkFormFields(editApk, csrfToken) {
   const isEditing = !!editApk;
+  // FIX: Removed unnecessary hidden inputs existingApkSha256 and existingSignatureSha256 for a cleaner form
   return `
     <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}">
-    ${isEditing ? `<input type="hidden" name="id" value="${escapeHtml(editApk._id)}"><input type="hidden" name="existingIconUrl" value="${escapeHtml(editApk.iconUrl || "")}"><input type="hidden" name="existingScreenshots" value="${escapeHtml(JSON.stringify(editApk.screenshots || []))}"><input type="hidden" name="existingApkSha256" value="${escapeHtml(editApk.apkSha256 || "")}"><input type="hidden" name="existingSignatureSha256" value="${escapeHtml(editApk.signatureSha256 || "")}">` : ""}
+    ${isEditing ? `<input type="hidden" name="id" value="${escapeHtml(editApk._id)}"><input type="hidden" name="existingIconUrl" value="${escapeHtml(editApk.iconUrl || "")}"><input type="hidden" name="existingScreenshots" value="${escapeHtml(JSON.stringify(editApk.screenshots || []))}">` : ""}
     <div class="form-group"><label>App Name</label><input type="text" name="appName" required maxlength="100" value="${isEditing ? escapeHtml(editApk.appName) : ""}" placeholder="Example App"></div>
-    <div class="form-group"><label>Package Name</label><input type="text" name="packageName" required maxlength="200" pattern="[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+" value="${isEditing ? escapeHtml(editApk.packageName) : ""}" placeholder="com.example.app"></div>
+    <div class="form-group"><label>Package Name</label><input type="text" name="packageName" required maxlength="200" value="${isEditing ? escapeHtml(editApk.packageName) : ""}" placeholder="com.example.app"></div>
     <div class="form-group"><label>Version Name</label><input type="text" name="versionName" required maxlength="50" value="${isEditing ? escapeHtml(editApk.versionName) : ""}" placeholder="2.0"></div>
     <div class="form-group"><label>Version Code</label><input type="number" name="versionCode" required min="1" step="1" value="${isEditing ? escapeHtml(editApk.versionCode) : ""}" placeholder="20"></div>
     <div class="form-group" style="grid-column:1/-1"><label>Direct APK URL</label><input type="url" name="apkUrl" required maxlength="500" value="${isEditing ? escapeHtml(editApk.apkUrl) : ""}" placeholder="https://example.com/app.apk"></div>
