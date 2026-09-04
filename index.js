@@ -14,14 +14,7 @@ const streamifier = require("streamifier");
 const app = express();
 
 /* =========================================================
-   V6.5.0 PRODUCTION EDITION (FULLY BUG FIXED)
-   - Existing device/session dashboard preserved
-   - Strict APK metadata validation
-   - APK SHA-256 + signing certificate SHA-256 support
-   - Safer URL/package/version validation
-   - Better multipart limits and error handling
-   - Safer app-registry rename/delete handling
-   - HSTS in production
+   V6.5.1 PRODUCTION EDITION (SMART DUAL-URL SYSTEM)
 ========================================================= */
 
 const PORT = Number(process.env.PORT || 3000);
@@ -65,9 +58,6 @@ try {
   console.error("Cloudinary config error:", err);
 }
 
-/* =========================================================
-   SECURITY / HTTP SETUP
-========================================================= */
 app.set("trust proxy", true);
 app.disable("x-powered-by");
 app.use(express.urlencoded({ extended: true, limit: "100kb" }));
@@ -79,9 +69,7 @@ app.use((req, res, next) => {
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Expires", "0");
-  if (IS_PRODUCTION) {
-    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-  }
+  if (IS_PRODUCTION) res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
   next();
 });
 
@@ -99,9 +87,6 @@ const trackingLimiter = rateLimit({ windowMs: 60 * 1000, max: 300, standardHeade
 const apiLimiter = rateLimit({ windowMs: 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false });
 const adminActionLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false, message: "Too many admin actions. Please try again shortly." });
 
-/* =========================================================
-   UPLOADS
-========================================================= */
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024, files: 11, fields: 30, parts: 45 },
@@ -126,9 +111,6 @@ function uploadToCloudinary(buffer, folderName) {
   });
 }
 
-/* =========================================================
-   DATABASE SCHEMAS
-========================================================= */
 const AppRegistrySchema = new mongoose.Schema({
   appId: { type: String, required: true, unique: true, index: true, trim: true, maxlength: MAX_APP_ID_LENGTH },
   appName: { type: String, required: true, trim: true, maxlength: MAX_APP_NAME_LENGTH },
@@ -168,6 +150,7 @@ const ApkSchema = new mongoose.Schema({
   versionCode: { type: Number, required: true, min: 1, index: true },
   packageName: { type: String, required: true, trim: true, maxlength: MAX_PACKAGE_LENGTH, index: true },
   apkUrl: { type: String, required: true, trim: true, maxlength: MAX_URL_LENGTH },
+  patchUrl: { type: String, default: "", trim: true, maxlength: MAX_URL_LENGTH }, // NAYA: Patch URL Field
   iconUrl: { type: String, default: "", trim: true, maxlength: MAX_URL_LENGTH },
   screenshots: { type: [String], default: [] },
   apkSha256: { type: String, default: "", trim: true, lowercase: true, maxlength: MAX_HASH_LENGTH },
@@ -182,13 +165,8 @@ const Device = mongoose.model("Device", DeviceSchema);
 const UsageSession = mongoose.model("UsageSession", SessionSchema);
 const Apk = mongoose.model("Apk", ApkSchema);
 
-/* =========================================================
-   HELPERS / VALIDATION
-========================================================= */
 function escapeHtml(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
 function safeString(value, maxLength) { return String(value ?? "").trim().substring(0, maxLength); }
-
-// FIX: Relaxed regex to allow legacy package names (without dots)
 function isValidPackageName(value) { return /^[A-Za-z][A-Za-z0-9_\.]*$/.test(String(value || "")); }
 function isValidAppId(value) { const s = String(value || "").trim(); return s.length > 0 && s.length <= MAX_APP_ID_LENGTH && !/[\r\n<>"']/.test(s); }
 function isValidVersionName(value) { const s = String(value || "").trim(); return s.length > 0 && s.length <= MAX_VERSION_NAME_LENGTH && !/[\r\n<>]/.test(s); }
@@ -233,9 +211,6 @@ function normalizeScreenshotUrls(list) {
   return Array.from(new Set((Array.isArray(list) ? list : []).filter((x) => typeof x === "string" && isValidHttpUrl(x)).map((x) => x.trim().substring(0, MAX_URL_LENGTH)))).slice(0, 10);
 }
 
-/* =========================================================
-   AUTH / CSRF
-========================================================= */
 function csrfProtection(req, res, next) {
   if (!req.session) return res.status(500).send("Session unavailable.");
   const method = req.method.toUpperCase(); const protectedMethod = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
@@ -253,9 +228,6 @@ async function verifyPassword(password) {
   if (input.length !== stored.length) return false; return crypto.timingSafeEqual(input, stored);
 }
 
-/* =========================================================
-   SESSION CLEANUP
-========================================================= */
 async function closeOnlineSession(deviceId, appId, reason, timestamp) {
   const now = Number(timestamp) || Date.now(); const nowDate = new Date(now);
   const sessionDoc = await UsageSession.findOneAndUpdate({ deviceId, appId, status: "online" }, { $set: { status: "offline", endReason: reason, endTime: nowDate, endTimestamp: now, lastSeenTime: nowDate, lastSeenTimestamp: now, durationMs: 0 } }, { new: true, sort: { startTimestamp: -1 } });
@@ -281,9 +253,6 @@ async function markStaleSessionsOffline() {
 const cleanupInterval = setInterval(markStaleSessionsOffline, CLEANUP_INTERVAL_MS);
 cleanupInterval.unref();
 
-/* =========================================================
-   TRACKING API
-========================================================= */
 const knownApps = new Set();
 
 async function ensureAppRegistry(appId) {
@@ -357,7 +326,7 @@ const UI_STYLES = `
 
 const TOPBAR_HTML = (csrfToken) => `
 <div class="topbar">
-  <div class="brand">Admin Console<span>V6.5.0 Production Edition</span></div>
+  <div class="brand">Admin Console<span>V6.5.1 Production Edition</span></div>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
     <a href="/" class="btn btn-blue">Devices</a>
     <a href="/apps" class="btn btn-orange">App Systems</a>
@@ -366,9 +335,6 @@ const TOPBAR_HTML = (csrfToken) => `
   </div>
 </div>`;
 
-/* =========================================================
-   LOGIN
-========================================================= */
 app.get("/login", csrfProtection, (req, res) => {
   if (req.session && req.session.adminAuthenticated) return res.redirect("/");
   res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Login</title>${UI_STYLES}</head><body style="display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0"><div class="card" style="width:100%;max-width:420px;padding:24px"><h1 style="margin-top:0">Login</h1>${req.query.error ? '<div style="color:#b91c1c;margin-bottom:10px;font-size:13px">Invalid username/password</div>' : ""}<form method="POST" action="/login"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><div class="form-group"><label>Username</label><input type="text" name="username" required autocomplete="username"></div><div class="form-group"><label>Password</label><input type="password" name="password" required autocomplete="current-password"></div><button class="btn btn-dark" style="width:100%" type="submit">Sign In</button></form></div></body></html>`);
@@ -388,9 +354,6 @@ app.post("/login", loginLimiter, csrfProtection, async (req, res) => {
 
 app.post("/logout", requireLogin, csrfProtection, (req, res) => { req.session.destroy(() => { res.clearCookie("admin.sid"); res.redirect("/login"); }); });
 
-/* =========================================================
-   APP MANAGER
-========================================================= */
 app.get("/apps", requireLogin, csrfProtection, async (req, res) => {
   try {
     const apps = await AppRegistry.find().sort({ createdAt: -1 }).lean();
@@ -460,7 +423,7 @@ app.post("/action/app-registry/delete", requireLogin, adminActionLimiter, csrfPr
 });
 
 /* =========================================================
-   APK MANAGER
+   APK MANAGER (WITH DUAL URL FORM)
 ========================================================= */
 function apkFormFields(editApk, csrfToken) {
   const isEditing = !!editApk;
@@ -471,9 +434,17 @@ function apkFormFields(editApk, csrfToken) {
     <div class="form-group"><label>Package Name</label><input type="text" name="packageName" required maxlength="200" value="${isEditing ? escapeHtml(editApk.packageName) : ""}" placeholder="com.example.app"></div>
     <div class="form-group"><label>Version Name</label><input type="text" name="versionName" required maxlength="50" value="${isEditing ? escapeHtml(editApk.versionName) : ""}" placeholder="2.0"></div>
     <div class="form-group"><label>Version Code</label><input type="number" name="versionCode" required min="1" step="1" value="${isEditing ? escapeHtml(editApk.versionCode) : ""}" placeholder="20"></div>
-    <div class="form-group" style="grid-column:1/-1"><label>Direct APK URL</label><input type="url" name="apkUrl" required maxlength="500" value="${isEditing ? escapeHtml(editApk.apkUrl) : ""}" placeholder="https://example.com/app.apk"></div>
-    <div class="form-group" style="grid-column:1/-1"><label>APK SHA-256 <span class="status-line">(64 hex characters; strongly recommended)</span></label><input type="text" name="apkSha256" maxlength="64" pattern="[A-Fa-f0-9]{64}" value="${isEditing ? escapeHtml(editApk.apkSha256 || "") : ""}" placeholder="SHA-256 of the complete APK file"></div>
-    <div class="form-group" style="grid-column:1/-1"><label>Signing Certificate SHA-256 <span class="status-line">(64 hex characters; recommended)</span></label><input type="text" name="signatureSha256" maxlength="64" pattern="[A-Fa-f0-9]{64}" value="${isEditing ? escapeHtml(editApk.signatureSha256 || "") : ""}" placeholder="SHA-256 of the APK signing certificate"></div>
+    
+    <div class="form-group" style="grid-column:1/-1; background:#f9fafb; padding:10px; border:1px dashed #d1d5db; border-radius:6px;">
+      <label>1. Direct APK URL (Full 100MB Base APK - Required)</label>
+      <input type="url" name="apkUrl" required maxlength="500" value="${isEditing ? escapeHtml(editApk.apkUrl) : ""}" placeholder="https://example.com/app.apk" style="margin-bottom:10px;">
+      
+      <label>2. Smart Update Patch URL (Optional 2MB Patch for fast updates)</label>
+      <input type="url" name="patchUrl" maxlength="500" value="${isEditing ? escapeHtml(editApk.patchUrl || "") : ""}" placeholder="https://example.com/update.patch">
+    </div>
+
+    <div class="form-group" style="grid-column:1/-1"><label>APK SHA-256 <span class="status-line">(64 hex characters)</span></label><input type="text" name="apkSha256" maxlength="64" pattern="[A-Fa-f0-9]{64}" value="${isEditing ? escapeHtml(editApk.apkSha256 || "") : ""}" placeholder="SHA-256 of the complete APK file"></div>
+    <div class="form-group" style="grid-column:1/-1"><label>Signing Certificate SHA-256 <span class="status-line">(64 hex characters)</span></label><input type="text" name="signatureSha256" maxlength="64" pattern="[A-Fa-f0-9]{64}" value="${isEditing ? escapeHtml(editApk.signatureSha256 || "") : ""}" placeholder="SHA-256 of the APK signing certificate"></div>
     <div class="form-group" style="grid-column:1/-1"><label>Upload App Icon</label><input type="file" name="iconFile" accept="image/*">${isEditing && editApk.iconUrl ? `<br><small style="color:green">Current icon active — leave empty to keep it.</small>` : ""}</div>
     <div class="form-group" style="grid-column:1/-1"><label>Upload Feature Screenshots (max 10)</label><input type="file" name="screenshotFiles" accept="image/*" multiple></div>
     <div class="form-group" style="grid-column:1/-1"><label>Changelog / Description</label><textarea name="description" rows="3" maxlength="500">${isEditing ? escapeHtml(editApk.description || "") : ""}</textarea></div>
@@ -491,7 +462,10 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
         <td><div style="display:flex;align-items:center;gap:10px">${apk.iconUrl ? `<img src="${escapeHtml(apk.iconUrl)}" style="width:36px;height:36px;border-radius:8px;object-fit:cover" alt="icon">` : '<div style="width:36px;height:36px;border-radius:8px;background:#e5e7eb"></div>'}<div><strong>${escapeHtml(apk.appName)}</strong><br><span class="status-line">${escapeHtml(apk.description)}</span></div></div></td>
         <td><span class="badge online">${escapeHtml(apk.versionName)}</span><br>Code: ${escapeHtml(apk.versionCode)}</td>
         <td><code>${escapeHtml(apk.packageName)}</code></td>
-        <td><a href="${escapeHtml(apk.apkUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--blue);font-size:12px">Download</a><br><span class="status-line">${apk.apkSha256 ? "SHA-256 ✓" : "No file hash"}${apk.signatureSha256 ? " · Signer ✓" : " · No signer hash"}</span></td>
+        <td>
+          <a href="${escapeHtml(apk.apkUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--blue);font-size:12px">Full APK</a>
+          ${apk.patchUrl ? `<br><a href="${escapeHtml(apk.patchUrl)}" target="_blank" rel="noopener noreferrer" style="color:#ea580c;font-size:12px">Smart Patch</a>` : ""}
+        </td>
         <td>${safeDate(apk.createdAt)}</td>
         <td><div style="display:flex;gap:5px"><a href="/apks?edit=${escapeHtml(apk._id)}" class="btn btn-blue" style="padding:6px 10px">Edit</a><form class="inline-form" method="POST" action="/action/apk/delete" onsubmit="return confirm('Delete this APK from the store?')"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><input type="hidden" name="id" value="${escapeHtml(apk._id)}"><button class="btn btn-red" type="submit" style="padding:6px 10px">Delete</button></form></div></td>
       </tr>`).join("");
@@ -500,9 +474,9 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
     const isEditing = !!editApk; const formAction = isEditing ? "/action/apk/edit" : "/action/apk/add";
     const formTitle = isEditing ? `Edit APK: ${escapeHtml(editApk.appName)}` : "Publish New APK";
 
-    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>APK Manager</title>${UI_STYLES}</head><body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>APK Store Manager</h1><p class="status-line">Package + versionCode are authoritative. SHA-256 fields protect content/signing identity when supplied.</p></div>
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>APK Manager</title>${UI_STYLES}</head><body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>APK Store Manager</h1><p class="status-line">Provide both Full APK URL and an optional Smart Update Patch URL to save user data.</p></div>
       <div class="card"><div class="card-header">${formTitle}${isEditing ? '<a href="/apks" class="btn btn-gray" style="float:right;padding:3px 8px;font-size:11px">Cancel Edit</a>' : ""}</div><div class="card-body"><form id="apkForm" method="POST" action="${formAction}" enctype="multipart/form-data" style="display:grid;grid-template-columns:1fr 1fr;gap:15px">${apkFormFields(editApk, res.locals.csrfToken)}</form></div></div>
-      <div class="card"><div class="card-header">Published Apps</div><div class="table-wrap"><table><thead><tr><th>App</th><th>Version</th><th>Package</th><th>APK</th><th>Published</th><th>Action</th></tr></thead><tbody>${apkRows}</tbody></table></div></div></div>
+      <div class="card"><div class="card-header">Published Apps</div><div class="table-wrap"><table><thead><tr><th>App</th><th>Version</th><th>Package</th><th>Downloads</th><th>Published</th><th>Action</th></tr></thead><tbody>${apkRows}</tbody></table></div></div></div>
       <script>document.getElementById("apkForm").addEventListener("submit",function(){var b=document.getElementById("submitBtn");b.disabled=true;b.style.opacity=".7";b.style.cursor="not-allowed";b.innerHTML="⏳ Uploading... Please wait!";});</script>
     </body></html>`);
   } catch (err) { console.error("APK page error:", err.message); res.status(500).send("Error: " + escapeHtml(err.message)); }
@@ -510,12 +484,17 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
 
 async function validateApkInput(body) {
   const appName = safeString(body.appName, MAX_APP_NAME_LENGTH); const packageName = safeString(body.packageName, MAX_PACKAGE_LENGTH);
-  const versionName = safeString(body.versionName, MAX_VERSION_NAME_LENGTH); const apkUrl = safeString(body.apkUrl, MAX_URL_LENGTH);
+  const versionName = safeString(body.versionName, MAX_VERSION_NAME_LENGTH); 
+  const apkUrl = safeString(body.apkUrl, MAX_URL_LENGTH);
+  const patchUrl = safeString(body.patchUrl, MAX_URL_LENGTH); // NAYA: Read Patch URL
   const description = safeString(body.description, MAX_DESCRIPTION_LENGTH); const versionCode = parsePositiveVersionCode(body.versionCode);
   const apkSha256 = normalizeSha256(body.apkSha256); const signatureSha256 = normalizeSha256(body.signatureSha256);
+  
   if (!appName || !isValidPackageName(packageName) || !isValidVersionName(versionName) || !versionCode || !isValidHttpUrl(apkUrl)) { return { error: "Invalid APK metadata. Check app name, package, version, versionCode and HTTPS/HTTP APK URL." }; }
+  if (patchUrl && !isValidHttpUrl(patchUrl)) { return { error: "Patch URL is invalid. It must be a valid HTTP/HTTPS link." }; }
   if (apkSha256 === null) return { error: "APK SHA-256 must be exactly 64 hexadecimal characters." }; if (signatureSha256 === null) return { error: "Signing certificate SHA-256 must be exactly 64 hexadecimal characters." };
-  return { appName, packageName, versionName, apkUrl, description, versionCode, apkSha256, signatureSha256 };
+  
+  return { appName, packageName, versionName, apkUrl, patchUrl, description, versionCode, apkSha256, signatureSha256 };
 }
 
 async function processMediaUploads(req, existingIconUrl, existingScreenshots) {
@@ -627,17 +606,26 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
     if (appFilter !== "all") onlineMatch.appId = appFilter;
 
     const results = await Promise.all([
-      Device.aggregate([{ $match: deviceMatch }, { $group: { _id: "$status", count: { $sum: 1 } } }]), Device.countDocuments(deviceMatch),
-      Device.find(deviceMatch).sort({ registeredAt: -1 }).skip(skip).limit(DEVICES_PER_PAGE).lean(), UsageSession.aggregate(usagePipeline),
-      UsageSession.aggregate(chartPipeline), UsageSession.find(onlineMatch).select({ deviceId: 1, appId: 1 }).lean(),
+      Device.aggregate([{ $match: deviceMatch }, { $group: { _id: "$status", count: { $sum: 1 } } }]),
+      Device.countDocuments(deviceMatch),
+      Device.find(deviceMatch).sort({ registeredAt: -1 }).skip(skip).limit(DEVICES_PER_PAGE).lean(),
+      UsageSession.aggregate(usagePipeline),
+      UsageSession.aggregate(chartPipeline),
+      UsageSession.find(onlineMatch).select({ deviceId: 1, appId: 1 }).lean(),
       AppRegistry.find().select("appId appName").sort({ appName: 1 }).lean()
     ]);
 
     let totalDevices = 0, approved = 0, pending = 0, blocked = 0;
-    results[0].forEach((item) => { const count = Number(item.count || 0); totalDevices += count; if (item._id === "approved") approved = count; if (item._id === "pending") pending = count; if (item._id === "blocked") blocked = count; });
+    results[0].forEach((item) => {
+      const count = Number(item.count || 0); totalDevices += count;
+      if (item._id === "approved") approved = count; if (item._id === "pending") pending = count; if (item._id === "blocked") blocked = count;
+    });
 
     const usageMap = {}; let totalUsage = 0;
-    results[3].forEach((item) => { const usage = Number(item.totalUsage || 0); const key = `${item._id.deviceId}_${item._id.appId}`; usageMap[key] = { totalUsage: usage, sessionCount: Number(item.sessionCount || 0) }; totalUsage += usage; });
+    results[3].forEach((item) => {
+      const usage = Number(item.totalUsage || 0); const key = `${item._id.deviceId}_${item._id.appId}`;
+      usageMap[key] = { totalUsage: usage, sessionCount: Number(item.sessionCount || 0) }; totalUsage += usage;
+    });
 
     const onlineSet = new Set(results[5].map((item) => `${item.deviceId}_${item.appId}`));
     const totalPages = Math.max(1, Math.ceil(results[1] / DEVICES_PER_PAGE)); const currentPage = Math.min(requestedPage, totalPages);
@@ -661,7 +649,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
    DASHBOARD PAGE
 ========================================================= */
 app.get("/", requireLogin, csrfProtection, (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.5.0</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V6.5.1</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${UI_STYLES}</head>
 <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container">
   <div class="page-title"><h1>Device Management</h1><p id="refreshStatus" class="status-line">Loading dashboard...</p></div>
   <div class="card"><div class="card-body"><form id="filterForm" class="filters"><input id="search" class="search" placeholder="Search device ID or nickname"><select id="appFilter"><option value="all">All Apps</option></select><select id="filter"><option value="all">All Time</option><option value="today">Today (IST)</option><option value="7d">Last 7 Days</option><option value="30d">Last 30 Days</option></select><button class="btn btn-blue" type="submit">Apply Filter</button><button type="button" class="btn btn-gray" onclick="manualRefresh()">Refresh</button></form>
@@ -680,242 +668,103 @@ app.get("/", requireLogin, csrfProtection, (req, res) => {
   let refreshInProgress = false;
   const refreshStatus = document.getElementById("refreshStatus");
 
-  function escapeHTML(value) {
-    return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-  }
+  function escapeHTML(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
 
   async function refreshDashboard() {
-    if (refreshInProgress) return;
-    refreshInProgress = true;
-    clearTimeout(refreshTimer);
+    if (refreshInProgress) return; refreshInProgress = true; clearTimeout(refreshTimer);
     try {
       refreshStatus.textContent = "Refreshing data...";
       const params = new URLSearchParams();
-      params.set("search", document.getElementById("search").value);
-      params.set("filter", document.getElementById("filter").value);
-      params.set("appFilter", document.getElementById("appFilter").value);
-      params.set("page", currentPage);
+      params.set("search", document.getElementById("search").value); params.set("filter", document.getElementById("filter").value); params.set("appFilter", document.getElementById("appFilter").value); params.set("page", currentPage);
       
       const response = await fetch("/api/dashboard?" + params.toString(), { credentials: "same-origin", cache: "no-store" });
       if (response.status === 401) { window.location.href = "/login"; return; }
-      const data = await response.json();
-      if (!data.success) throw new Error("API error");
+      const data = await response.json(); if (!data.success) throw new Error("API error");
       
-      updateAppDropdown(data.apps);
-      updateStats(data.stats);
-      updateTable(data.devices);
-      updatePagination(data.pagination);
+      updateAppDropdown(data.apps); updateStats(data.stats); updateTable(data.devices); updatePagination(data.pagination);
       
       if (chartInstance) chartInstance.destroy();
       chartInstance = new Chart(document.getElementById("usageChart"), {
         type: "line",
-        data: {
-          labels: data.chart.labels,
-          datasets: [{ label: "Usage (mins)", data: data.chart.data, borderColor: "#2563eb", backgroundColor: "rgba(37,99,235,.08)", borderWidth: 2, fill: true }]
-        },
+        data: { labels: data.chart.labels, datasets: [{ label: "Usage (mins)", data: data.chart.data, borderColor: "#2563eb", backgroundColor: "rgba(37,99,235,.08)", borderWidth: 2, fill: true }] },
         options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } }
       });
       refreshStatus.textContent = "Last refreshed: " + new Date().toLocaleTimeString("en-IN");
-    } catch (error) {
-      console.error(error);
-      refreshStatus.textContent = "Unable to refresh.";
-    } finally {
-      refreshInProgress = false;
-      scheduleRefresh();
-    }
+    } catch (error) { console.error(error); refreshStatus.textContent = "Unable to refresh."; } finally { refreshInProgress = false; scheduleRefresh(); }
   }
 
   function manualRefresh() { refreshDashboard(); }
-
   function updateAppDropdown(apps) {
-    const appSelect = document.getElementById("appFilter");
-    const currentValue = appSelect.value;
+    const appSelect = document.getElementById("appFilter"); const currentValue = appSelect.value;
     appSelect.innerHTML = '<option value="all">All Apps</option>';
-    (apps || []).forEach(app => {
-      if (app && app.appId) {
-        const option = document.createElement("option");
-        option.value = app.appId;
-        option.textContent = app.appName + " (" + app.appId + ")";
-        if (app.appId === currentValue) option.selected = true;
-        appSelect.appendChild(option);
-      }
-    });
+    (apps || []).forEach(app => { if (app && app.appId) { const option = document.createElement("option"); option.value = app.appId; option.textContent = app.appName + " (" + app.appId + ")"; if (app.appId === currentValue) option.selected = true; appSelect.appendChild(option); } });
   }
 
   function updateStats(stats) {
-    document.getElementById("totalDevices").textContent = stats.totalDevices;
-    document.getElementById("approved").textContent = stats.approved;
-    document.getElementById("pending").textContent = stats.pending;
-    document.getElementById("blocked").textContent = stats.blocked;
-    document.getElementById("online").textContent = stats.online;
-    document.getElementById("totalUsage").textContent = stats.totalUsage;
+    document.getElementById("totalDevices").textContent = stats.totalDevices; document.getElementById("approved").textContent = stats.approved; document.getElementById("pending").textContent = stats.pending; document.getElementById("blocked").textContent = stats.blocked; document.getElementById("online").textContent = stats.online; document.getElementById("totalUsage").textContent = stats.totalUsage;
   }
 
   function updateTable(devices) {
     const tbody = document.getElementById("deviceTable");
-    if (!devices.length) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:25px">No devices found.</td></tr>';
-      return;
-    }
+    if (!devices.length) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:25px">No devices found.</td></tr>'; return; }
     tbody.innerHTML = devices.map(function(device) {
-      const deviceId = escapeHTML(device.deviceId);
-      const appId = escapeHTML(device.appId);
-      const nickname = escapeHTML(device.nickname);
-      const status = escapeHTML(device.status);
-      const liveClass = device.online ? "online" : "offline";
-      const liveText = device.online ? "ONLINE" : "OFFLINE";
-      
+      const deviceId = escapeHTML(device.deviceId); const appId = escapeHTML(device.appId); const nickname = escapeHTML(device.nickname); const status = escapeHTML(device.status); const liveClass = device.online ? "online" : "offline"; const liveText = device.online ? "ONLINE" : "OFFLINE";
       let actions = '<button type="button" class="btn btn-purple" data-history="' + deviceId + '" data-app="' + appId + '">History</button>';
       actions += '<form class="inline-form" method="POST" action="/action/device/clear-history"><input type="hidden" name="_csrf" value="' + csrfToken + '"><input type="hidden" name="deviceId" value="' + deviceId + '"><input type="hidden" name="appId" value="' + appId + '"><button class="btn btn-red" type="submit">Clear History</button></form>';
       if (device.status !== "approved") { actions += '<form class="inline-form" method="POST" action="/action/device/approve"><input type="hidden" name="_csrf" value="' + csrfToken + '"><input type="hidden" name="deviceId" value="' + deviceId + '"><input type="hidden" name="appId" value="' + appId + '"><button class="btn btn-green" type="submit">Approve</button></form>'; }
       if (device.status !== "blocked") { actions += '<form class="inline-form" method="POST" action="/action/device/block"><input type="hidden" name="_csrf" value="' + csrfToken + '"><input type="hidden" name="deviceId" value="' + deviceId + '"><input type="hidden" name="appId" value="' + appId + '"><button class="btn btn-orange" type="submit">Block</button></form>'; }
       if (device.status !== "pending") { actions += '<form class="inline-form" method="POST" action="/action/device/pending"><input type="hidden" name="_csrf" value="' + csrfToken + '"><input type="hidden" name="deviceId" value="' + deviceId + '"><input type="hidden" name="appId" value="' + appId + '"><button class="btn btn-yellow" type="submit">Pending</button></form>'; }
-      
-      // FIX: Exactly parsed quote formatting to prevent frontend JS crash!
       actions += '<form class="inline-form" method="POST" action="/action/device/delete" onsubmit="return confirm(\\'Delete device and its history?\\')"><input type="hidden" name="_csrf" value="' + csrfToken + '"><input type="hidden" name="deviceId" value="' + deviceId + '"><input type="hidden" name="appId" value="' + appId + '"><button class="btn btn-red" type="submit">Delete Device</button></form>';
-      
       return '<tr><td><form class="inline-form" method="POST" action="/action/device/nickname"><input type="hidden" name="_csrf" value="' + csrfToken + '"><input type="hidden" name="deviceId" value="' + deviceId + '"><input type="hidden" name="appId" value="' + appId + '"><input class="nickname-input" name="nickname" maxlength="50" placeholder="Nickname" value="' + nickname + '"><button class="btn btn-blue" type="submit">Save</button></form></td><td><code>' + deviceId + '</code><br><span class="badge badge-app">' + appId + '</span></td><td><span class="badge ' + status + '">' + status.toUpperCase() + '</span></td><td><span class="badge ' + liveClass + '">' + liveText + '</span></td><td><strong>' + escapeHTML(device.usage) + '</strong><br><span style="font-size:11px;color:#6b7280">' + Number(device.sessions) + ' sessions</span></td><td>' + escapeHTML(device.registeredAt) + '</td><td class="action-cell">' + actions + '</td></tr>';
     }).join("");
-    
-    document.querySelectorAll("[data-history]").forEach(function(btn) {
-      btn.addEventListener("click", function() {
-        openHistory(btn.getAttribute("data-history"), btn.getAttribute("data-app"));
-      });
-    });
+    document.querySelectorAll("[data-history]").forEach(function(btn) { btn.addEventListener("click", function() { openHistory(btn.getAttribute("data-history"), btn.getAttribute("data-app")); }); });
   }
 
   async function openHistory(deviceId, appId) {
-    const modal = document.getElementById("historyModal");
-    const title = document.getElementById("modalTitle");
-    const body = document.getElementById("historyTableBody");
-    title.textContent = "History — " + deviceId + " (" + appId + ")";
-    body.innerHTML = '<tr><td colspan="6" style="text-align:center">Loading...</td></tr>';
-    modal.style.display = "flex";
+    const modal = document.getElementById("historyModal"); const title = document.getElementById("modalTitle"); const body = document.getElementById("historyTableBody");
+    title.textContent = "History — " + deviceId + " (" + appId + ")"; body.innerHTML = '<tr><td colspan="6" style="text-align:center">Loading...</td></tr>'; modal.style.display = "flex";
     try {
       const response = await fetch("/api/sessions/" + encodeURIComponent(deviceId) + "?appId=" + encodeURIComponent(appId), { credentials: "same-origin", cache: "no-store" });
-      if (response.status === 401) { window.location.href = "/login"; return; }
-      const data = await response.json();
-      if (!data.success || !data.sessions.length) {
-        body.innerHTML = '<tr><td colspan="6" style="text-align:center">No session history available.</td></tr>';
-        return;
-      }
-      body.innerHTML = data.sessions.map(function(item) {
-        const statusClass = item.status === "online" ? "online" : "offline";
-        return '<tr><td>' + escapeHTML(item.startTime) + '</td><td>' + escapeHTML(item.lastSeenTime) + '</td><td>' + escapeHTML(item.endTime) + '</td><td><strong>' + escapeHTML(item.duration) + '</strong></td><td><span class="badge ' + statusClass + '">' + escapeHTML(String(item.status).toUpperCase()) + '</span></td><td>' + escapeHTML(item.endReason) + '</td></tr>';
-      }).join("");
-    } catch (error) {
-      body.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#b91c1c">Failed to load session history.</td></tr>';
-    }
+      if (response.status === 401) { window.location.href = "/login"; return; } const data = await response.json();
+      if (!data.success || !data.sessions.length) { body.innerHTML = '<tr><td colspan="6" style="text-align:center">No session history available.</td></tr>'; return; }
+      body.innerHTML = data.sessions.map(function(item) { const statusClass = item.status === "online" ? "online" : "offline"; return '<tr><td>' + escapeHTML(item.startTime) + '</td><td>' + escapeHTML(item.lastSeenTime) + '</td><td>' + escapeHTML(item.endTime) + '</td><td><strong>' + escapeHTML(item.duration) + '</strong></td><td><span class="badge ' + statusClass + '">' + escapeHTML(String(item.status).toUpperCase()) + '</span></td><td>' + escapeHTML(item.endReason) + '</td></tr>'; }).join("");
+    } catch (error) { body.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#b91c1c">Failed to load session history.</td></tr>'; }
   }
 
-  function closeModal() { document.getElementById("historyModal").style.display = "none"; }
-  window.addEventListener("click", function(event) { if (event.target === document.getElementById("historyModal")) { closeModal(); } });
-  
-  function updatePagination(p) {
-    currentPage = p.page;
-    document.getElementById("pageInfo").textContent = "Page " + p.page + " of " + p.totalPages;
-    document.getElementById("prevPage").disabled = p.page <= 1;
-    document.getElementById("nextPage").disabled = p.page >= p.totalPages;
-  }
-  
-  function scheduleRefresh() {
-    clearTimeout(refreshTimer);
-    if (!document.hidden) { refreshTimer = setTimeout(refreshDashboard, REFRESH_SECONDS * 1000); }
-  }
-  
-  document.getElementById("filterForm").addEventListener("submit", function(event) { event.preventDefault(); currentPage = 1; refreshDashboard(); });
-  document.getElementById("prevPage").addEventListener("click", function() { if (currentPage > 1) { currentPage--; refreshDashboard(); } });
-  document.getElementById("nextPage").addEventListener("click", function() { currentPage++; refreshDashboard(); });
-  document.addEventListener("visibilitychange", function() { if (document.hidden) { clearTimeout(refreshTimer); } else { scheduleRefresh(); } });
-  
+  function closeModal() { document.getElementById("historyModal").style.display = "none"; } window.addEventListener("click", function(event) { if (event.target === document.getElementById("historyModal")) { closeModal(); } });
+  function updatePagination(p) { currentPage = p.page; document.getElementById("pageInfo").textContent = "Page " + p.page + " of " + p.totalPages; document.getElementById("prevPage").disabled = p.page <= 1; document.getElementById("nextPage").disabled = p.page >= p.totalPages; }
+  function scheduleRefresh() { clearTimeout(refreshTimer); if (!document.hidden) { refreshTimer = setTimeout(refreshDashboard, REFRESH_SECONDS * 1000); } }
+  document.getElementById("filterForm").addEventListener("submit", function(event) { event.preventDefault(); currentPage = 1; refreshDashboard(); }); document.getElementById("prevPage").addEventListener("click", function() { if (currentPage > 1) { currentPage--; refreshDashboard(); } }); document.getElementById("nextPage").addEventListener("click", function() { currentPage++; refreshDashboard(); }); document.addEventListener("visibilitychange", function() { if (document.hidden) { clearTimeout(refreshTimer); } else { scheduleRefresh(); } });
   refreshDashboard();
 </script></body></html>`);
 });
 
-/* =========================================================
-   ERROR / 404 HANDLERS
-========================================================= */
 app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    console.error("Upload error:", err.code, err.message);
-    return res.status(400).send("Upload failed: " + escapeHtml(err.message));
-  }
-  if (err) {
-    console.error("Unhandled request error:", err.stack || err.message || err);
-    return res.status(500).send("Internal server error.");
-  }
+  if (err instanceof multer.MulterError) { console.error("Upload error:", err.code, err.message); return res.status(400).send("Upload failed: " + escapeHtml(err.message)); }
+  if (err) { console.error("Unhandled request error:", err.stack || err.message || err); return res.status(500).send("Internal server error."); }
   next();
 });
 app.use((req, res) => res.status(404).send("404 Not Found"));
 
-/* =========================================================
-   SHUTDOWN / STARTUP
-========================================================= */
-let server = null;
-let shuttingDown = false;
-
+let server = null; let shuttingDown = false;
 async function shutdown(signal) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(signal + " received. Shutting down...");
-  clearInterval(cleanupInterval);
-  try {
-    if (server) await new Promise((resolve) => server.close(resolve));
-    await mongoose.disconnect();
-    console.log("Shutdown complete.");
-    process.exit(0);
-  } catch (err) {
-    console.error("Shutdown error:", err.message);
-    process.exit(1);
-  }
+  if (shuttingDown) return; shuttingDown = true; console.log(signal + " received. Shutting down..."); clearInterval(cleanupInterval);
+  try { if (server) await new Promise((resolve) => server.close(resolve)); await mongoose.disconnect(); console.log("Shutdown complete."); process.exit(0); } catch (err) { console.error("Shutdown error:", err.message); process.exit(1); }
 }
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM")); process.on("SIGINT", () => shutdown("SIGINT"));
 
 async function startServer() {
   try {
-    await mongoose.connect(MONGO_URI, {
-      serverSelectionTimeoutMS: 10000,
-      socketTimeoutMS: 45000
-    });
-    console.log("MongoDB connected.");
-
+    await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 10000, socketTimeoutMS: 45000 });
     try {
       await Device.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
       await UsageSession.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
-
       const distinctAppIds = await Device.distinct("appId");
-      for (const appId of distinctAppIds) {
-        if (!appId) continue;
-        await AppRegistry.updateOne(
-          { appId },
-          { $setOnInsert: { appId, appName: appId } },
-          { upsert: true }
-        ).catch((err) => console.error("App registry backfill error:", err.message));
-        knownApps.add(appId);
-      }
-    } catch (err) {
-      console.error("Backfill error:", err.message);
-    }
-
-    try {
-      console.log("Syncing database indexes...");
-      await Device.syncIndexes();
-      await UsageSession.syncIndexes();
-      await Apk.syncIndexes();
-      await AppRegistry.syncIndexes();
-      console.log("Indexes synced perfectly!");
-    } catch (err) {
-      console.error("Index sync error:", err.message);
-    }
-
-    server = app.listen(PORT, () => {
-      console.log("V6.5.0 Production Edition running on port " + PORT);
-    });
-  } catch (err) {
-    console.error("FATAL startup error:", err.message);
-    process.exit(1);
-  }
+      for (const appId of distinctAppIds) { if (!appId) continue; await AppRegistry.updateOne({ appId }, { $setOnInsert: { appId, appName: appId } }, { upsert: true }).catch((err) => console.error("App registry backfill error:", err.message)); knownApps.add(appId); }
+    } catch (err) {}
+    try { await Device.syncIndexes(); await UsageSession.syncIndexes(); await Apk.syncIndexes(); await AppRegistry.syncIndexes(); } catch (err) {}
+    server = app.listen(PORT, () => { console.log("V6.5.1 Production Edition running on port " + PORT); });
+  } catch (err) { process.exit(1); }
 }
 
 startServer();
