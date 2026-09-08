@@ -1039,7 +1039,15 @@ async function downloadHttpFile(url, destination) {
       req = transport.get(parsed, {
         hostname: parsed.hostname, port: parsed.port || undefined, path: `${parsed.pathname}${parsed.search}`, method: "GET",
         headers: { "User-Agent": "RD-ApkStore-ReleaseEngine/8.3.2", "Accept": "*/*" },
-        lookup: (_hostname, _options, cb) => cb(null, address, net.isIP(address)), servername: parsed.hostname
+        // Node 20+/24 may call lookup with { all: true } for Happy Eyeballs.
+        // Returning the legacy 3-argument form in that case causes:
+        // "Invalid IP address: undefined".
+        lookup: (_hostname, options, cb) => {
+          const family = net.isIP(address);
+          if (options && options.all) return cb(null, [{ address, family }]);
+          return cb(null, address, family);
+        },
+        servername: parsed.hostname
       }, (response) => {
         if ([301,302,303,307,308].includes(response.statusCode || 0)) {
           response.resume();
@@ -2183,6 +2191,20 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
             const data = await r.json(); if(!data.success) return;
             const tbody = document.getElementById("releaseJobsTable");
             if(!data.jobs.length){tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:20px">No release jobs yet.</td></tr>';return;}
+
+            // Preserve manual artifact URL drafts across the 5-second status refresh.
+            // Without this, tbody.innerHTML replaces the inputs every refresh and clears
+            // whatever the admin has pasted/typed.
+            const manualUrlDrafts = {};
+            tbody.querySelectorAll('form[action="/action/apk/manual-attach"]').forEach(function(form){
+              const jobIdInput = form.querySelector('input[name="jobId"]');
+              if(!jobIdInput || !jobIdInput.value) return;
+              manualUrlDrafts[jobIdInput.value] = {
+                apkUrl: form.querySelector('input[name="apkUrl"]')?.value || "",
+                patchUrl: form.querySelector('input[name="patchUrl"]')?.value || ""
+              };
+            });
+
             tbody.innerHTML = data.jobs.map(function(j){
               var actions = "";
               if(j.manualReady){
@@ -2201,6 +2223,19 @@ app.get("/apks", requireLogin, csrfProtection, async (req, res) => {
               if(j.lastError) actions += '<div style="max-width:360px;font-size:11px;color:#b91c1c;margin-top:6px">'+escapeHTML(j.lastError)+'</div>';
               return '<tr><td>'+escapeHTML(j.originalFilename)+'</td><td><code>'+escapeHTML(j.packageName||"—")+'</code></td><td>'+escapeHTML(j.versionName||"—")+' ('+escapeHTML(j.versionCode??"—")+')</td><td>'+(j.patchGenerated?'Yes':'No')+'</td><td><span class="badge badge-app">'+escapeHTML(j.artifactStorageMode||data.storageMode||"—")+'</span></td><td><span class="badge '+escapeHTML(j.status)+'">'+escapeHTML(j.status.toUpperCase())+'</span></td><td>'+escapeHTML(j.createdAt)+'</td><td>'+actions+'</td></tr>';
             }).join("");
+
+            // Restore any draft values after the row HTML has been rebuilt.
+            Object.keys(manualUrlDrafts).forEach(function(jobId){
+              const draft = manualUrlDrafts[jobId];
+              const form = Array.from(tbody.querySelectorAll('form[action="/action/apk/manual-attach"]')).find(function(f){
+                return f.querySelector('input[name="jobId"]')?.value === jobId;
+              });
+              if(!form) return;
+              const apkInput = form.querySelector('input[name="apkUrl"]');
+              const patchInput = form.querySelector('input[name="patchUrl"]');
+              if(apkInput) apkInput.value = draft.apkUrl;
+              if(patchInput) patchInput.value = draft.patchUrl;
+            });
           }catch(e){}
         }
         refreshReleaseJobs();
