@@ -1,11 +1,11 @@
 {
-  "name": "app-tracker",
-  "version": "1.0.0",
-  "description": "App Tracking Dashboard",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "name": "rd-apk-store-server",
+  "version": "8.3.0",
+  "private": true,
+  "description": "RD APK Store — Production APK Release, Smart Update and Artifact Management Server",
+  "main": "index.js",
+  "scripts": {"start": "node index.js"},
+  "engines": {"node": ">=20.0.0"},
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cloudinary": "^1.41.3",
