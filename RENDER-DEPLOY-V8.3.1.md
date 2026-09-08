@@ -55,3 +55,7 @@ before the web server starts.
 6. Confirm metadata extraction succeeds before testing Smart Patch.
 
 A real signed APK + MongoDB transaction-capable cluster + selected artifact storage provider still requires an end-to-end production test; static/source verification cannot substitute for that test.
+
+
+## V8.3.1 hotfix
+The CommonJS import for connect-mongo 6.x is intentionally `const { MongoStore } = require("connect-mongo")`. connect-mongo 6 exposes the CJS named export; using `const MongoStore = require("connect-mongo")` causes `MongoStore.create is not a function`.
