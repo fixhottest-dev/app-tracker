@@ -1,5 +1,5 @@
-# RD APK Store V8.3.1 — reproducible Render runtime
-# Provides Node.js + Android Build Tools + BSDIFF/BSPATCH.
+# RD APK Store V8.3.2 — Render production runtime
+# Node.js + Android Build Tools + BSDIFF/BSPATCH.
 FROM node:24-bookworm-slim
 
 ENV NODE_ENV=production \
@@ -15,8 +15,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl unzip openjdk-17-jre-headless bsdiff \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Google's official Android command-line tools and Build Tools 36.0.0.
-# Build Tools contains aapt, aapt2 and apksigner.
+# Google's official Android command-line tools + Build Tools 36.0.0.
 ARG CMDLINE_TOOLS_VERSION=15859902
 RUN mkdir -p ${ANDROID_SDK_ROOT}/cmdline-tools \
     && curl -fsSL --retry 5 --retry-delay 2 \
@@ -37,11 +36,16 @@ COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
 COPY index.js ./
+COPY scripts ./scripts
 
-# Fail the image build if the required native release toolchain is missing.
+# Fail the image build if any release-native dependency is absent.
 RUN node -e "const fs=require('fs'); for (const p of ['/opt/android-sdk/build-tools/36.0.0/aapt2','/opt/android-sdk/build-tools/36.0.0/aapt','/opt/android-sdk/build-tools/36.0.0/apksigner','/usr/bin/bsdiff','/usr/bin/bspatch']) { if (!fs.existsSync(p)) throw new Error('Missing release tool: '+p); } console.log('Release toolchain present.');"
-RUN node --check index.js
+RUN node --check index.js && node scripts/static-verify.js
 
+# Render injects PORT at runtime; the application binds to it.
 EXPOSE 10000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||10000)+'/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
+# Runtime is non-root.
+USER node
 CMD ["node", "index.js"]

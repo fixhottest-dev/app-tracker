@@ -1,12 +1,12 @@
 {
   "name": "rd-apk-store-server",
-  "version": "8.3.1",
+  "version": "8.3.2",
   "private": true,
   "description": "RD APK Store — production APK release, Smart Patch, update and device management server",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js"
+    "check": "node --check index.js && node scripts/static-verify.js"
   },
   "engines": {
     "node": ">=24.0.0"

@@ -22,7 +22,7 @@ const net = require("net");
 const app = express();
 
 /* =========================================================
-   V8.3.1 ULTIMATE RENDER PRODUCTION EDITION
+   V8.3.2 ULTIMATE RENDER PRODUCTION EDITION
    (OG Device/App/Dashboard Server + Automatic APK Release Engine)
 ========================================================= */
 
@@ -394,6 +394,9 @@ const ReleaseJobSchema = new mongoose.Schema({
 
   attempts: { type: Number, default: 0 },
   lastError: { type: String, default: "" },
+  lastErrorCode: { type: String, default: "", maxlength: 120 },
+  stage: { type: String, default: "queued", maxlength: 120, index: true },
+  stageUpdatedAt: { type: Date, default: null },
   
   workerId: { type: String, default: "" },
   leaseToken: { type: String, default: "", index: true },
@@ -409,6 +412,7 @@ const ReleaseJobSchema = new mongoose.Schema({
 ReleaseJobSchema.index({ status: 1, createdAt: 1 });
 ReleaseJobSchema.index({ status: 1, heartbeatAt: 1 });
 ReleaseJobSchema.index({ extractedPackageName: 1, extractedVersionCode: 1 });
+ReleaseJobSchema.index({ status: 1, stage: 1, stageUpdatedAt: 1 });
 
 const AppRegistry = mongoose.model("AppRegistry", AppRegistrySchema);
 const Device = mongoose.model("Device", DeviceSchema);
@@ -815,7 +819,7 @@ async function githubApi(pathname, options = {}) {
       "Accept": "application/vnd.github+json",
       "Authorization": `Bearer ${GITHUB_TOKEN}`,
       "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "RD-ApkStore-ReleaseEngine/8.3"
+      "User-Agent": "RD-ApkStore-ReleaseEngine/8.3.2"
     },
     body: options.body,
     signal: AbortSignal.timeout(getArtifactHttpTimeout())
@@ -921,7 +925,7 @@ async function githubUploadAsset(release, localPath, assetName, contentType) {
       "Accept": "application/vnd.github+json",
       "Authorization": `Bearer ${GITHUB_TOKEN}`,
       "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "RD-ApkStore-ReleaseEngine/8.3",
+      "User-Agent": "RD-ApkStore-ReleaseEngine/8.3.2",
       "Content-Type": contentType || "application/octet-stream",
       "Content-Length": String(stat.size)
     },
@@ -952,7 +956,7 @@ async function customUploadFile(localPath, storagePath, contentType) {
   const headers = {
     "Content-Type": contentType || "application/octet-stream",
     "Content-Length": String(stat.size),
-    "User-Agent": "RD-ApkStore-ReleaseEngine/8.3"
+    "User-Agent": "RD-ApkStore-ReleaseEngine/8.3.2"
   };
   if (CUSTOM_STORAGE_API_KEY) headers.Authorization = `Bearer ${CUSTOM_STORAGE_API_KEY}`;
 
@@ -972,7 +976,7 @@ async function customDeleteFile(storagePath) {
   if (!CUSTOM_STORAGE_DELETE_URL_TEMPLATE || !storagePath) return;
   try {
     const url = fillStorageTemplate(CUSTOM_STORAGE_DELETE_URL_TEMPLATE, storagePath);
-    const headers = { "User-Agent": "RD-ApkStore-ReleaseEngine/8.3" };
+    const headers = { "User-Agent": "RD-ApkStore-ReleaseEngine/8.3.2" };
     if (CUSTOM_STORAGE_API_KEY) headers.Authorization = `Bearer ${CUSTOM_STORAGE_API_KEY}`;
     const response = await fetch(url, { method: "DELETE", headers, signal: AbortSignal.timeout(getArtifactHttpTimeout()) });
     if (!response.ok && response.status !== 404) console.error("Custom storage cleanup HTTP " + response.status);
@@ -1034,7 +1038,7 @@ async function downloadHttpFile(url, destination) {
       };
       req = transport.get(parsed, {
         hostname: parsed.hostname, port: parsed.port || undefined, path: `${parsed.pathname}${parsed.search}`, method: "GET",
-        headers: { "User-Agent": "RD-ApkStore-ReleaseEngine/8.3", "Accept": "*/*" },
+        headers: { "User-Agent": "RD-ApkStore-ReleaseEngine/8.3.2", "Accept": "*/*" },
         lookup: (_hostname, _options, cb) => cb(null, address, net.isIP(address)), servername: parsed.hostname
       }, (response) => {
         if ([301,302,303,307,308].includes(response.statusCode || 0)) {
@@ -1130,54 +1134,131 @@ async function artifactDelete(storagePath) {
 /* =========================================================
    WORKER LEASE & FENCING HELPERS
 ========================================================= */
-async function assertJobOwnership(job) {
-  const current = await ReleaseJob.findOne({
-    _id: job._id,
-    status: "processing",
+function ownershipSnapshot(job) {
+  return {
+    jobId: String(job && job._id || ""),
     workerId: WORKER_ID,
-    leaseToken: job.leaseToken,
-    leaseVersion: job.leaseVersion
-  }).select("_id").lean();
-  
-  if (!current) {
-    const err = new Error("RELEASE_JOB_OWNERSHIP_LOST");
-    err.code = "RELEASE_JOB_OWNERSHIP_LOST";
-    throw err;
-  }
-  return true;
+    leaseVersion: Number(job && job.leaseVersion || 0)
+  };
 }
 
-function makeOwnershipLostError() {
-  const err = new Error("RELEASE_JOB_OWNERSHIP_LOST");
+function makeOwnershipLostError(stage = "unknown", result = null) {
+  const err = new Error(`RELEASE_JOB_OWNERSHIP_LOST${stage ? ` at ${stage}` : ""}`);
   err.code = "RELEASE_JOB_OWNERSHIP_LOST";
+  err.stage = stage || "unknown";
+  if (result) {
+    err.matchedCount = Number(result.matchedCount || 0);
+    err.modifiedCount = Number(result.modifiedCount || 0);
+  }
   return err;
+}
+
+async function assertJobOwnership(job, stage = "ownership_assert") {
+  try {
+    const current = await ReleaseJob.findOne({
+      _id: job._id,
+      status: "processing",
+      workerId: WORKER_ID,
+      leaseToken: job.leaseToken,
+      leaseVersion: job.leaseVersion
+    }).select("_id").lean();
+
+    if (!current) {
+      console.error("Release job ownership check failed:", JSON.stringify(ownershipSnapshot(job)), "stage=" + stage);
+      throw makeOwnershipLostError(stage);
+    }
+    return true;
+  } catch (err) {
+    if (err && err.code === "RELEASE_JOB_OWNERSHIP_LOST") throw err;
+    throw err;
+  }
+}
+
+async function assertActiveJobOwnership(job, state, stage = "ownership_assert") {
+  if (state && state.ownershipLost) throw makeOwnershipLostError(stage);
+  await assertJobOwnership(job, stage);
+  if (state && state.ownershipLost) throw makeOwnershipLostError(stage);
+}
+
+async function fencedReleaseJobUpdate(job, update, options = {}, stage = "fenced_update") {
+  const result = await ReleaseJob.updateOne(
+    {
+      _id: job._id,
+      status: "processing",
+      workerId: WORKER_ID,
+      leaseToken: job.leaseToken,
+      leaseVersion: job.leaseVersion
+    },
+    update,
+    options
+  );
+
+  // IMPORTANT: matchedCount is the ownership/CAS signal. modifiedCount may be 0
+  // when the requested values already equal the stored values, which is still a
+  // valid owned job and must never be treated as lease loss.
+  if (Number(result.matchedCount || 0) !== 1) {
+    console.error(
+      "Release job fenced update lost ownership:",
+      JSON.stringify(ownershipSnapshot(job)),
+      `stage=${stage} matchedCount=${Number(result.matchedCount || 0)} modifiedCount=${Number(result.modifiedCount || 0)}`
+    );
+    throw makeOwnershipLostError(stage, result);
+  }
+  return result;
 }
 
 async function heartbeatReleaseJob(job) {
   const result = await ReleaseJob.updateOne(
     { _id: job._id, status: "processing", workerId: WORKER_ID, leaseToken: job.leaseToken, leaseVersion: job.leaseVersion },
-    { $set: { heartbeatAt: new Date() } }
+    { $set: { heartbeatAt: new Date(), stageUpdatedAt: new Date() } }
   );
-  if (result.modifiedCount !== 1) throw makeOwnershipLostError();
+  if (Number(result.matchedCount || 0) !== 1) {
+    console.error(
+      "Release job heartbeat lost ownership:",
+      JSON.stringify(ownershipSnapshot(job)),
+      `matchedCount=${Number(result.matchedCount || 0)} modifiedCount=${Number(result.modifiedCount || 0)}`
+    );
+    throw makeOwnershipLostError("heartbeat", result);
+  }
 }
 
-async function assertActiveJobOwnership(job, state) {
-  if (state && state.ownershipLost) throw makeOwnershipLostError();
-  await assertJobOwnership(job);
-  if (state && state.ownershipLost) throw makeOwnershipLostError();
+async function setReleaseStage(job, stage) {
+  const cleanStage = safeString(stage, 120) || "unknown";
+  try {
+    const result = await ReleaseJob.updateOne(
+      { _id: job._id, status: "processing", workerId: WORKER_ID, leaseToken: job.leaseToken, leaseVersion: job.leaseVersion },
+      { $set: { stage: cleanStage, stageUpdatedAt: new Date() } }
+    );
+    if (Number(result.matchedCount || 0) !== 1) {
+      console.error("Release job stage update lost ownership:", JSON.stringify(ownershipSnapshot(job)), "stage=" + cleanStage);
+      throw makeOwnershipLostError(cleanStage, result);
+    }
+  } catch (err) {
+    if (err && err.code === "RELEASE_JOB_OWNERSHIP_LOST") throw err;
+    console.warn(`Release job stage update failed at ${cleanStage}:`, err.message);
+  }
 }
 
-async function failJobOwned(job, errorMessage, options = {}) {
+async function failJobOwned(job, error, options = {}) {
+  const errorMessage = error instanceof Error ? error.message : String(error || "");
+  const errorCode = error && error.code ? String(error.code) : "RELEASE_JOB_FAILED";
   const result = await ReleaseJob.updateOne(
     { _id: job._id, status: "processing", workerId: WORKER_ID, leaseToken: job.leaseToken, leaseVersion: job.leaseVersion },
-    { 
-      $set: { status: "failed", lastError: String(errorMessage || "").substring(0, 1000), completedAt: new Date() },
+    {
+      $set: {
+        status: "failed",
+        lastError: errorMessage.substring(0, 1000),
+        lastErrorCode: errorCode.substring(0, 120),
+        completedAt: new Date(),
+        stage: "failed",
+        stageUpdatedAt: new Date()
+      },
       $unset: { workerId: 1, leaseToken: 1, claimedAt: 1, heartbeatAt: 1 }
     }
   );
-  
-  if (result.modifiedCount !== 1) {
-    console.warn(`Job ${job._id} failure update skipped because ownership was lost.`);
+
+  if (Number(result.matchedCount || 0) !== 1) {
+    console.warn(`Job ${job._id} failure update skipped because ownership was lost (matched=${Number(result.matchedCount || 0)} modified=${Number(result.modifiedCount || 0)}).`);
     return;
   }
 
@@ -1194,6 +1275,20 @@ async function failJobOwned(job, errorMessage, options = {}) {
       const pubId = extractCloudinaryPublicId(url);
       if (pubId) cloudinary.uploader.destroy(pubId).catch(()=>{});
     }
+  }
+}
+
+async function ensureReleasePackageLock(packageName) {
+  try {
+    await ReleasePackageLock.updateOne(
+      { packageName },
+      { $setOnInsert: { packageName, lastTouchedAt: new Date() } },
+      { upsert: true }
+    );
+  } catch (err) {
+    if (!err || err.code !== 11000) throw err;
+    const existing = await ReleasePackageLock.findOne({ packageName }).select("_id").lean();
+    if (!existing) throw new Error("PACKAGE_RELEASE_LOCK_INITIALIZATION_RACE");
   }
 }
 
@@ -1305,7 +1400,7 @@ async function recoverStaleJobs() {
             ]
           },
           {
-            $set: { status: "failed", lastError: "Job exceeded max attempts after stale recovery.", completedAt: new Date() },
+            $set: { status: "failed", lastError: "Job exceeded max attempts after stale recovery.", lastErrorCode: "STALE_JOB_MAX_ATTEMPTS", completedAt: new Date(), stage: "failed", stageUpdatedAt: new Date() },
             $unset: { workerId: 1, leaseToken: 1, claimedAt: 1, heartbeatAt: 1 }
           }
         );
@@ -1321,7 +1416,7 @@ async function recoverStaleJobs() {
             _id: job._id, status: "processing", workerId: job.workerId, leaseToken: job.leaseToken, leaseVersion: job.leaseVersion,
             $or: [ { heartbeatAt: { $lt: staleCutoff } }, { heartbeatAt: null, claimedAt: { $lt: staleCutoff } } ]
           },
-          { $set: { status: "queued" }, $unset: { workerId: 1, leaseToken: 1, claimedAt: 1, heartbeatAt: 1 } }
+          { $set: { status: "queued", stage: "queued", stageUpdatedAt: new Date(), lastErrorCode: "STALE_JOB_REQUEUED" }, $unset: { workerId: 1, leaseToken: 1, claimedAt: 1, heartbeatAt: 1 } }
         );
         if (reclaimResult.modifiedCount === 1) {
           console.warn("Requeued stale release job:", String(job._id));
@@ -1341,12 +1436,14 @@ async function processReleaseJob(job) {
   let heartbeatTimer = null;
   let publicationCommitted = false;
   let retainManualArtifacts = false;
+  let manualPatchTempPath = "";
   const ownershipState = { ownershipLost: false };
   let githubRelease = null;
 
   try {
     assertArtifactStorageReady();
-    await assertActiveJobOwnership(job, ownershipState);
+    await setReleaseStage(job, "starting");
+    await assertActiveJobOwnership(job, ownershipState, "starting");
 
     heartbeatTimer = setInterval(() => {
       heartbeatReleaseJob(job).catch((err) => {
@@ -1356,14 +1453,15 @@ async function processReleaseJob(job) {
     }, WORKER_HEARTBEAT_INTERVAL_MS);
     heartbeatTimer.unref();
 
-    await assertActiveJobOwnership(job, ownershipState);
+    await assertActiveJobOwnership(job, ownershipState, "preflight");
 
+    await setReleaseStage(job, "apk_validation");
     await assertZipLikeApk(job.apkTempPath);
     const metadata = await extractApkManifestMetadata(job.apkTempPath);
     const signatureSha256 = await extractApkSignatureSha256(job.apkTempPath);
     const targetApkSha256 = await sha256File(job.apkTempPath);
     const targetApkSizeBytes = await fileSize(job.apkTempPath);
-    await assertActiveJobOwnership(job, ownershipState);
+    await assertActiveJobOwnership(job, ownershipState, "metadata_complete");
 
     const metadataUpdate = await ReleaseJob.updateOne(
       { _id: job._id, status: "processing", workerId: WORKER_ID, leaseToken: job.leaseToken, leaseVersion: job.leaseVersion },
@@ -1378,7 +1476,7 @@ async function processReleaseJob(job) {
         artifactStorageMode: ARTIFACT_STORAGE_MODE
       }}
     );
-    if (metadataUpdate.modifiedCount !== 1) throw makeOwnershipLostError();
+    if (Number(metadataUpdate.matchedCount || 0) !== 1) throw makeOwnershipLostError("metadata_persist", metadataUpdate);
 
     const activeJob = await ReleaseJob.findOne({
       extractedPackageName: metadata.packageName,
@@ -1408,7 +1506,7 @@ async function processReleaseJob(job) {
         { _id: job._id, status: "processing", workerId: WORKER_ID, leaseToken: job.leaseToken, leaseVersion: job.leaseVersion },
         { $set: { githubReleaseId: Number(githubRelease.id || 0) || null, githubReleaseTag: String(githubRelease._tagName || "") } }
       );
-      if (githubReleaseUpdate.modifiedCount !== 1) throw makeOwnershipLostError();
+      if (Number(githubReleaseUpdate.matchedCount || 0) !== 1) throw makeOwnershipLostError("github_release_persist", githubReleaseUpdate);
     }
 
     let patchStoragePath = "";
@@ -1418,13 +1516,13 @@ async function processReleaseJob(job) {
     let previousTempPath = null;
     let patchGeneratedSuccessfully = false;
     let stagingPatchStoragePath = "";
-    let manualPatchTempPath = "";
     let githubPatchAssetId = null;
     let githubApkAssetId = null;
 
     if (previous) {
       try {
-        await assertActiveJobOwnership(job, ownershipState);
+        await setReleaseStage(job, "previous_artifact_validation");
+        await assertActiveJobOwnership(job, ownershipState, "previous_artifact_validation");
 
         previousTempPath = path.join(TEMP_UPLOAD_DIR, `prev-${crypto.randomBytes(8).toString("hex")}.apk`);
         tempFilesToClean.push(previousTempPath);
@@ -1443,6 +1541,7 @@ async function processReleaseJob(job) {
         const previousSignature = await extractApkSignatureSha256(previousTempPath);
         if (previousSignature !== previous.signatureSha256) throw new ReleaseSecurityError("Previous APK signing certificate mismatch.", "PREVIOUS_APK_SIGNATURE_MISMATCH");
 
+        await setReleaseStage(job, "smart_patch_generation");
         const patchTempPath = path.join(TEMP_UPLOAD_DIR, `patch-${crypto.randomBytes(8).toString("hex")}.patch`);
         tempFilesToClean.push(patchTempPath);
 
@@ -1486,7 +1585,7 @@ async function processReleaseJob(job) {
             githubPatchAssetId = uploadResult.assetId || null;
             if (patchStoragePath) uploadedArtifactPaths.add(patchStoragePath);
 
-            await assertActiveJobOwnership(job, ownershipState);
+            await assertActiveJobOwnership(job, ownershipState, "patch_remote_verification");
             const verifyPatchTempPath = path.join(TEMP_UPLOAD_DIR, `verify-patch-${crypto.randomBytes(8).toString("hex")}.patch`);
             tempFilesToClean.push(verifyPatchTempPath);
             await artifactDownload(patchStoragePath, patchPublicUrl, verifyPatchTempPath);
@@ -1516,7 +1615,8 @@ async function processReleaseJob(job) {
       }
     }
 
-    await assertActiveJobOwnership(job, ownershipState);
+    await setReleaseStage(job, "patch_state_persist");
+    await assertActiveJobOwnership(job, ownershipState, "patch_state_persist");
 
     const patchUpdateRes = await ReleaseJob.updateOne(
       { _id: job._id, status: "processing", workerId: WORKER_ID, leaseToken: job.leaseToken, leaseVersion: job.leaseVersion },
@@ -1535,8 +1635,9 @@ async function processReleaseJob(job) {
         githubPatchAssetId
       }}
     );
-    if (patchUpdateRes.modifiedCount !== 1) throw makeOwnershipLostError();
+    if (Number(patchUpdateRes.matchedCount || 0) !== 1) throw makeOwnershipLostError("patch_state_persist", patchUpdateRes);
 
+    await setReleaseStage(job, "apk_artifact_upload");
     let apkStoragePath = "";
     let apkPublicUrl = "";
     let stagingApkStoragePath = `releases/${metadata.packageName}/${metadata.versionCode}/${job._id}/app.apk`;
@@ -1557,7 +1658,7 @@ async function processReleaseJob(job) {
       githubApkAssetId = uploadResult.assetId || null;
       if (apkStoragePath) uploadedArtifactPaths.add(apkStoragePath);
 
-      await assertActiveJobOwnership(job, ownershipState);
+      await assertActiveJobOwnership(job, ownershipState, "apk_remote_verification");
 
       const verifyTempPath = path.join(TEMP_UPLOAD_DIR, `verify-${crypto.randomBytes(8).toString("hex")}.apk`);
       tempFilesToClean.push(verifyTempPath);
@@ -1589,19 +1690,22 @@ async function processReleaseJob(job) {
         artifactStorageMode: ARTIFACT_STORAGE_MODE
       }}
     );
-    if (apkUpdateRes.modifiedCount !== 1) throw makeOwnershipLostError();
+    if (Number(apkUpdateRes.matchedCount || 0) !== 1) throw makeOwnershipLostError("apk_state_persist", apkUpdateRes);
 
     if (ARTIFACT_STORAGE_MODE === "manual") {
-      await ReleaseJob.updateOne(
+      const manualReadyResult = await ReleaseJob.updateOne(
         { _id: job._id, status: "processing", workerId: WORKER_ID, leaseToken: job.leaseToken, leaseVersion: job.leaseVersion },
-        { $set: { status: "awaiting_upload", lastError: "" }, $unset: { workerId: 1, leaseToken: 1, claimedAt: 1, heartbeatAt: 1 } }
+        { $set: { status: "awaiting_upload", lastError: "", lastErrorCode: "", stage: "awaiting_upload", stageUpdatedAt: new Date() }, $unset: { workerId: 1, leaseToken: 1, claimedAt: 1, heartbeatAt: 1 } }
       );
+      if (Number(manualReadyResult.matchedCount || 0) !== 1) throw makeOwnershipLostError("manual_ready", manualReadyResult);
       console.log(`Release job ${job._id} is ready for manual artifact upload/verification.`);
       return;
     }
 
-    await assertActiveJobOwnership(job, ownershipState);
+    await setReleaseStage(job, "publication_preflight");
+    await assertActiveJobOwnership(job, ownershipState, "publication_preflight");
 
+    await setReleaseStage(job, "publication_transaction");
     const releaseFields = {
       appName: metadata.appName,
       description: job.submittedDescription || "",
@@ -1647,11 +1751,7 @@ async function processReleaseJob(job) {
 
     // Ensure the per-package lock document exists outside the transaction. This
     // avoids collection-creation/upsert races on the first release of a package.
-    await ReleasePackageLock.updateOne(
-      { packageName: releaseFields.packageName },
-      { $setOnInsert: { packageName: releaseFields.packageName, lastTouchedAt: new Date() } },
-      { upsert: true }
-    );
+    await ensureReleasePackageLock(releaseFields.packageName);
 
     const session = await mongoose.startSession();
     try {
@@ -1687,7 +1787,7 @@ async function processReleaseJob(job) {
           { $set: { status: "published", releaseId: createdApk._id, completedAt: new Date() } },
           { session }
         );
-        if (updateResult.modifiedCount !== 1) throw makeOwnershipLostError();
+        if (Number(updateResult.matchedCount || 0) !== 1) throw makeOwnershipLostError("publication_job_finalize", updateResult);
       });
     } finally {
       await session.endSession();
@@ -1733,7 +1833,7 @@ async function runReleaseWorkerTick() {
     const now = new Date();
     const job = await ReleaseJob.findOneAndUpdate(
       { status: "queued" },
-      { $set: { status: "processing", workerId: WORKER_ID, leaseToken, claimedAt: now, heartbeatAt: now, startedAt: now }, $inc: { attempts: 1, leaseVersion: 1 } },
+      { $set: { status: "processing", workerId: WORKER_ID, leaseToken, claimedAt: now, heartbeatAt: now, startedAt: now, stage: "claimed", stageUpdatedAt: now, lastError: "", lastErrorCode: "" }, $inc: { attempts: 1, leaseVersion: 1 } },
       { sort: { createdAt: 1 }, new: true }
     );
     if (!job) return;
@@ -1822,6 +1922,9 @@ app.get("/api/releases", requireApiLogin, async (req, res) => {
       patchGenerated: job.patchGenerated,
       attempts: job.attempts,
       lastError: job.lastError || "",
+      lastErrorCode: job.lastErrorCode || "",
+      stage: job.stage || job.status,
+      stageUpdatedAt: job.stageUpdatedAt ? safeDate(job.stageUpdatedAt) : null,
       artifactStorageMode: job.artifactStorageMode || ARTIFACT_STORAGE_MODE,
       manualReady: job.status === "awaiting_upload",
       manualApkDownloadUrl: job.status === "awaiting_upload" ? `/admin/release/${encodeURIComponent(String(job._id))}/artifact/apk` : "",
@@ -1850,7 +1953,7 @@ const UI_STYLES = `
 
 const TOPBAR_HTML = (csrfToken) => `
 <div class="topbar">
-  <div class="brand">Admin Console<span>V8.3.1 Ultimate Render Production Edition</span></div>
+  <div class="brand">Admin Console<span>V8.3.2 Ultimate Render Production Edition</span></div>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
     <a href="/" class="btn btn-blue">Devices</a>
     <a href="/apps" class="btn btn-orange">App Systems</a>
@@ -2281,12 +2384,20 @@ app.post("/action/apk/manual-attach", requireLogin, adminActionLimiter, csrfProt
       }
     }
 
+    await ensureReleasePackageLock(job.extractedPackageName);
+
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
         const currentJob = await ReleaseJob.findOne({ _id: job._id, status: "awaiting_upload", artifactStorageMode: "manual" }).session(session);
         if (!currentJob) throw new Error("RELEASE_JOB_STATE_CHANGED");
 
+        const packageLock = await ReleasePackageLock.findOneAndUpdate(
+          { packageName: currentJob.extractedPackageName },
+          { $set: { lastTouchedAt: new Date() } },
+          { new: true, session }
+        );
+        if (!packageLock) throw new Error("PACKAGE_RELEASE_LOCK_MISSING");
         const existing = await Apk.findOne({
           packageName: currentJob.extractedPackageName,
           versionCode: currentJob.extractedVersionCode,
@@ -2356,7 +2467,7 @@ app.post("/action/apk/manual-attach", requireLogin, adminActionLimiter, csrfProt
           },
           { session }
         );
-        if (updateResult.modifiedCount !== 1) throw new Error("RELEASE_JOB_STATE_CHANGED");
+        if (Number(updateResult.matchedCount || 0) !== 1) throw new Error("RELEASE_JOB_STATE_CHANGED");
       });
     } finally {
       await session.endSession();
@@ -2600,7 +2711,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
    DASHBOARD PAGE
 ========================================================= */
 app.get("/", requireLogin, csrfProtection, (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V8.3.1</title><script nonce="__CSP_NONCE__" src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>${UI_STYLES}</head>
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V8.3.2</title><script nonce="__CSP_NONCE__" src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>${UI_STYLES}</head>
 <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container">
   <div class="page-title"><h1>Device Management</h1><p id="refreshStatus" class="status-line">Loading dashboard...</p></div>
   <div class="card"><div class="card-body"><form id="filterForm" class="filters"><input id="search" class="search" placeholder="Search device ID or nickname"><select id="appFilter"><option value="all">All Apps</option></select><select id="filter"><option value="all">All Time</option><option value="today">Today (IST)</option><option value="7d">Last 7 Days</option><option value="30d">Last 30 Days</option></select><button class="btn btn-blue" type="submit">Apply Filter</button><button type="button" class="btn btn-gray" id="manualRefreshBtn">Refresh</button></form>
@@ -2786,7 +2897,7 @@ async function startServer() {
     await recoverStaleJobs();
 
     server = app.listen(PORT, () => {
-      console.log("V8.3.1 Ultimate Render Production Edition running on port " + PORT + " (artifact storage mode: " + storageModeLabel() + ")");
+      console.log("V8.3.2 Ultimate Render Production Edition running on port " + PORT + " (artifact storage mode: " + storageModeLabel() + ")");
     });
   } catch (err) { 
     console.error("Server startup failed:", err);
