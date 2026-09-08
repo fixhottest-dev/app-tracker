@@ -1,20 +1,26 @@
 {
   "name": "rd-apk-store-server",
-  "version": "8.3.0",
+  "version": "8.3.1",
   "private": true,
-  "description": "RD APK Store — Production APK Release, Smart Update and Artifact Management Server",
+  "description": "RD APK Store — production APK release, Smart Patch, update and device management server",
   "main": "index.js",
-  "scripts": {"start": "node index.js"},
-  "engines": {"node": ">=20.0.0"},
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
-    "cloudinary": "^1.41.3",
-    "connect-mongo": "^5.1.0",
-    "express": "^4.19.0",
-    "express-rate-limit": "^7.2.0",
-    "express-session": "^1.18.0",
-    "mongoose": "^8.4.0",
-    "multer": "^1.4.5-lts.1",
-    "streamifier": "^0.1.1"
+    "bcryptjs": "3.0.3",
+    "cloudinary": "2.11.0",
+    "connect-mongo": "6.0.0",
+    "express": "4.22.2",
+    "express-rate-limit": "8.7.0",
+    "express-session": "1.19.0",
+    "firebase-admin": "14.3.0",
+    "mongoose": "8.24.4",
+    "multer": "2.3.0",
+    "streamifier": "0.1.1"
   }
 }

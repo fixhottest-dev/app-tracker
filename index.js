@@ -22,7 +22,7 @@ const net = require("net");
 const app = express();
 
 /* =========================================================
-   V8.3.0 ULTIMATE FINAL PRODUCTION EDITION
+   V8.3.1 ULTIMATE RENDER PRODUCTION EDITION
    (OG Device/App/Dashboard Server + Automatic APK Release Engine)
 ========================================================= */
 
@@ -56,9 +56,9 @@ const ADMIN_SESSION_MAX_AGE = 24 * 60 * 60 * 1000;
 /* ---- APK release pipeline configuration ---- */
 const APK_MAX_SIZE_BYTES = Math.max(1024 * 1024, Number(process.env.APK_MAX_SIZE_BYTES || 400 * 1024 * 1024));
 const TEMP_UPLOAD_DIR = String(process.env.TEMP_UPLOAD_DIR || path.join(os.tmpdir(), "apk_store_releases"));
-const AAPT_PATH = String(process.env.AAPT_PATH || "aapt2");
-const AAPT_FALLBACK_PATH = String(process.env.AAPT_FALLBACK_PATH || "aapt");
-const APKSIGNER_PATH = String(process.env.APKSIGNER_PATH || "apksigner");
+const AAPT_PATH = String(process.env.AAPT_PATH || (fs.existsSync("/opt/android-sdk/build-tools/36.0.0/aapt2") ? "/opt/android-sdk/build-tools/36.0.0/aapt2" : "aapt2"));
+const AAPT_FALLBACK_PATH = String(process.env.AAPT_FALLBACK_PATH || (fs.existsSync("/opt/android-sdk/build-tools/36.0.0/aapt") ? "/opt/android-sdk/build-tools/36.0.0/aapt" : "aapt"));
+const APKSIGNER_PATH = String(process.env.APKSIGNER_PATH || (fs.existsSync("/opt/android-sdk/build-tools/36.0.0/apksigner") ? "/opt/android-sdk/build-tools/36.0.0/apksigner" : "apksigner"));
 const BSDIFF_CLI_PATH = String(process.env.BSDIFF_CLI_PATH || "bsdiff");
 const BSPATCH_CLI_PATH = String(process.env.BSPATCH_CLI_PATH || "bspatch");
 const RELEASE_WORKER_INTERVAL_MS = Math.max(1000, Number(process.env.RELEASE_WORKER_INTERVAL_MS || 4000));
@@ -161,6 +161,10 @@ else if (TRUST_PROXY === "true") {
   process.exit(1);
 }
 app.disable("x-powered-by");
+app.get("/healthz", (req, res) => {
+  const dbReady = mongoose.connection.readyState === 1;
+  res.status(dbReady ? 200 : 503).json({ status: dbReady ? "ok" : "degraded" });
+});
 app.use(express.urlencoded({ extended: true, limit: "100kb" }));
 app.use(express.json({ limit: "100kb" }));
 app.use((req, res, next) => {
@@ -411,6 +415,15 @@ const Device = mongoose.model("Device", DeviceSchema);
 const UsageSession = mongoose.model("UsageSession", SessionSchema);
 const Apk = mongoose.model("Apk", ApkSchema);
 const ReleaseJob = mongoose.model("ReleaseJob", ReleaseJobSchema);
+
+/* Per-package publication lock. A transaction updates this single document before
+   reading the latest published version, serializing concurrent publications for
+   the same package and closing the v2/v3 -> v3/v2 monotonic race. */
+const ReleasePackageLockSchema = new mongoose.Schema({
+  packageName: { type: String, required: true, unique: true, index: true, maxlength: MAX_PACKAGE_LENGTH },
+  lastTouchedAt: { type: Date, default: Date.now, index: true }
+}, { versionKey: false });
+const ReleasePackageLock = mongoose.model("ReleasePackageLock", ReleasePackageLockSchema);
 
 /* =========================================================
    HELPERS
@@ -1632,6 +1645,14 @@ async function processReleaseJob(job) {
       throw new Error("Verified patch publication fields are incomplete.");
     }
 
+    // Ensure the per-package lock document exists outside the transaction. This
+    // avoids collection-creation/upsert races on the first release of a package.
+    await ReleasePackageLock.updateOne(
+      { packageName: releaseFields.packageName },
+      { $setOnInsert: { packageName: releaseFields.packageName, lastTouchedAt: new Date() } },
+      { upsert: true }
+    );
+
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
@@ -1640,8 +1661,24 @@ async function processReleaseJob(job) {
         }).session(session);
         if (!currentJob) throw makeOwnershipLostError();
 
+        // Serialize publication for this package inside the MongoDB transaction.
+        // Concurrent v2/v3 publishers therefore cannot both read the same stale
+        // latest version and commit in reverse order.
+        const packageLock = await ReleasePackageLock.findOneAndUpdate(
+          { packageName: releaseFields.packageName },
+          { $set: { lastTouchedAt: new Date() } },
+          { new: true, session }
+        );
+        if (!packageLock) throw new Error("PACKAGE_RELEASE_LOCK_MISSING");
+
         const existing = await Apk.findOne({ packageName: releaseFields.packageName, versionCode: releaseFields.versionCode, status: "published" }).session(session);
         if (existing) throw new Error("PUBLISHED_RELEASE_ALREADY_EXISTS");
+
+        const latestPublished = await Apk.findOne({ packageName: releaseFields.packageName, status: "published" })
+          .sort({ versionCode: -1 }).session(session).lean();
+        if (latestPublished && releaseFields.versionCode <= latestPublished.versionCode) {
+          throw new Error(`MONOTONIC_PUBLICATION_VIOLATION: target versionCode ${releaseFields.versionCode} must be greater than current published versionCode ${latestPublished.versionCode}.`);
+        }
 
         const [createdApk] = await Apk.create([releaseFields], { session });
 
@@ -1813,7 +1850,7 @@ const UI_STYLES = `
 
 const TOPBAR_HTML = (csrfToken) => `
 <div class="topbar">
-  <div class="brand">Admin Console<span>V8.2.0 Ultimate Final Production Edition</span></div>
+  <div class="brand">Admin Console<span>V8.3.1 Ultimate Render Production Edition</span></div>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
     <a href="/" class="btn btn-blue">Devices</a>
     <a href="/apps" class="btn btn-orange">App Systems</a>
@@ -2563,7 +2600,7 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
    DASHBOARD PAGE
 ========================================================= */
 app.get("/", requireLogin, csrfProtection, (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V8.2.0</title><script nonce="__CSP_NONCE__" src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>${UI_STYLES}</head>
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Console V8.3.1</title><script nonce="__CSP_NONCE__" src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>${UI_STYLES}</head>
 <body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container">
   <div class="page-title"><h1>Device Management</h1><p id="refreshStatus" class="status-line">Loading dashboard...</p></div>
   <div class="card"><div class="card-body"><form id="filterForm" class="filters"><input id="search" class="search" placeholder="Search device ID or nickname"><select id="appFilter"><option value="all">All Apps</option></select><select id="filter"><option value="all">All Time</option><option value="today">Today (IST)</option><option value="7d">Last 7 Days</option><option value="30d">Last 30 Days</option></select><button class="btn btn-blue" type="submit">Apply Filter</button><button type="button" class="btn btn-gray" id="manualRefreshBtn">Refresh</button></form>
@@ -2685,6 +2722,32 @@ async function verifyMongoTransactionSupport() {
   }
 }
 
+async function verifyReleaseToolchain() {
+  const checks = [
+    { name: "aapt2", cmd: AAPT_PATH, args: ["version"] },
+    { name: "aapt", cmd: AAPT_FALLBACK_PATH, args: ["version"] },
+    { name: "apksigner", cmd: APKSIGNER_PATH, args: ["version"] },
+    { name: "bsdiff", cmd: BSDIFF_CLI_PATH, args: [] },
+    { name: "bspatch", cmd: BSPATCH_CLI_PATH, args: [] }
+  ];
+  const failures = [];
+  for (const check of checks) {
+    try {
+      await runCli(check.cmd, check.args, { timeout: 15000 });
+      console.log(`Release toolchain OK: ${check.name} -> ${check.cmd}`);
+    } catch (err) {
+      // bsdiff/bspatch intentionally exit non-zero when called without their
+      // required file arguments; ENOENT is the decisive missing-tool signal.
+      if (err && err.code !== "ENOENT" && (check.name === "bsdiff" || check.name === "bspatch")) {
+        console.log(`Release toolchain OK: ${check.name} -> ${check.cmd}`);
+      } else {
+        failures.push(`${check.name} (${check.cmd}): ${err && err.code === "ENOENT" ? "not found" : String(err && err.message || err)}`);
+      }
+    }
+  }
+  if (failures.length) throw new Error("Release toolchain is incomplete: " + failures.join(" | "));
+}
+
 async function startServer() {
   try {
     await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 10000, socketTimeoutMS: 45000 });
@@ -2709,19 +2772,21 @@ async function startServer() {
       await UsageSession.syncIndexes(); 
       await Apk.syncIndexes(); 
       await AppRegistry.syncIndexes(); 
-      await ReleaseJob.syncIndexes(); 
+      await ReleaseJob.syncIndexes();
+      await ReleasePackageLock.syncIndexes();
     } catch (err) {
       console.error("FATAL: MongoDB index synchronization failed:", err);
       process.exit(1);
     }
 
     await ensureTempDir();
+    await verifyReleaseToolchain();
 
     await reconcileOrphanedPublications();
     await recoverStaleJobs();
 
     server = app.listen(PORT, () => {
-      console.log("V8.3.0 Ultimate Final Production Edition running on port " + PORT + " (artifact storage mode: " + storageModeLabel() + ")");
+      console.log("V8.3.1 Ultimate Render Production Edition running on port " + PORT + " (artifact storage mode: " + storageModeLabel() + ")");
     });
   } catch (err) { 
     console.error("Server startup failed:", err);
