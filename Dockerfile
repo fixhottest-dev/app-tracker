@@ -36,6 +36,7 @@ COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
 COPY index.js ./
+COPY Dockerfile ./Dockerfile
 COPY scripts ./scripts
 
 # Fail the image build if any release-native dependency is absent.
