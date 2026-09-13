@@ -1,1 +1,12 @@
-
+1. Replace the deployed server's index.js with this index.js.
+2. Keep the existing package.json/package-lock.json and all existing Render environment variables.
+3. Add these three Render environment variables:
+   PUBLIC_SHARE_BASE_URL=https://app-tracker-xyp7.onrender.com
+   RDSTORE_SHARE_PACKAGE=com.ApkStoreManager
+   RDSTORE_SHA256_CERT_FINGERPRINT=<release certificate SHA-256>
+4. Deploy/redeploy on Render.
+5. Test /healthz.
+6. Test /.well-known/assetlinks.json.
+7. Test /app/com.ApkStoreManager.
+8. Test /download/rdstore.
+9. Test an app share URL such as /app/com.vlv.aravali.reels only after that package has a valid published release.
