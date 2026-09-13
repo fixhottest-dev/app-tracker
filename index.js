@@ -36,6 +36,26 @@ const IS_PRODUCTION = NODE_ENV === "production";
 const SESSION_SECRET = process.env.SESSION_SECRET || (!IS_PRODUCTION ? crypto.randomBytes(48).toString("hex") : "");
 const REDIRECT_URL = process.env.REDIRECT_URL || "https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app";
 
+/* ---- Public RD Store share / Android App Links ---- */
+const PUBLIC_SHARE_BASE_URL = String(process.env.PUBLIC_SHARE_BASE_URL || "https://app-tracker-xyp7.onrender.com").trim().replace(/\/+$/, "");
+const RDSTORE_SHARE_PACKAGE = String(process.env.RDSTORE_SHARE_PACKAGE || "com.ApkStoreManager").trim();
+const RDSTORE_SHA256_CERT_FINGERPRINT = String(process.env.RDSTORE_SHA256_CERT_FINGERPRINT || "").trim();
+let PUBLIC_SHARE_ORIGIN = "https://app-tracker-xyp7.onrender.com";
+try {
+  const publicShareUrl = new URL(PUBLIC_SHARE_BASE_URL);
+  if (publicShareUrl.protocol !== "https:" && IS_PRODUCTION) throw new Error("PUBLIC_SHARE_BASE_URL must use HTTPS in production.");
+  if (publicShareUrl.username || publicShareUrl.password || publicShareUrl.hash || publicShareUrl.search) throw new Error("PUBLIC_SHARE_BASE_URL must not contain credentials, query parameters, or fragments.");
+  if (publicShareUrl.pathname !== "/") throw new Error("PUBLIC_SHARE_BASE_URL must not contain a path.");
+  PUBLIC_SHARE_ORIGIN = publicShareUrl.origin;
+} catch (err) {
+  console.error("FATAL: PUBLIC_SHARE_BASE_URL is invalid:", err.message);
+  process.exit(1);
+}
+if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(RDSTORE_SHARE_PACKAGE)) {
+  console.error("FATAL: RDSTORE_SHARE_PACKAGE is not a valid Android package name.");
+  process.exit(1);
+}
+
 const ONLINE_TIMEOUT_MS = Math.max(10000, Number(process.env.ONLINE_TIMEOUT_MS || 45000));
 const CLEANUP_INTERVAL_MS = Math.max(5000, Number(process.env.CLEANUP_INTERVAL_MS || 15000));
 const DASHBOARD_REFRESH_SECONDS = 15;
@@ -441,6 +461,59 @@ function isValidVersionName(value) { const s = String(value || "").trim(); retur
 function parsePositiveVersionCode(value) { const s = String(value ?? "").trim(); if (!/^\d+$/.test(s)) return null; const n = Number(s); if (!Number.isSafeInteger(n) || n < 1) return null; return n; }
 function normalizeSha256(value) { const s = String(value ?? "").trim().toLowerCase(); if (!s) return ""; return /^[a-f0-9]{64}$/.test(s) ? s : null; }
 function isValidHttpUrl(value, options = {}) { try { const raw = String(value || "").trim(); if (!raw || raw.length > MAX_URL_LENGTH) return false; const u = new URL(raw); if (!["https:", "http:"].includes(u.protocol) || !u.hostname) return false; if (u.username || u.password || u.hash) return false; if (options.requireHttps && u.protocol !== "https:") return false; return true; } catch (err) { return false; } }
+function isPublicArtifactUrl(value) {
+  try {
+    const u = new URL(String(value || "").trim());
+    if (u.protocol !== "https:") return !IS_PRODUCTION && u.protocol === "http:" && !!u.hostname;
+    return !!u.hostname && !u.username && !u.password && !u.hash;
+  } catch (err) { return false; }
+}
+
+function publicSharePackageIsValid(value) {
+  return /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(String(value || "").trim());
+}
+
+function publicShareUrlForPackage(packageName) {
+  return PUBLIC_SHARE_ORIGIN + "/app/" + encodeURIComponent(String(packageName || "").trim());
+}
+
+function publicReleaseIsUsable(apk) {
+  if (!apk || apk.status !== "published") return false;
+  const packageName = String(apk.packageName || "").trim();
+  const versionName = String(apk.versionName || "").trim();
+  const versionCode = Number(apk.versionCode);
+  if (!publicSharePackageIsValid(packageName) || packageName.length > MAX_PACKAGE_LENGTH) return false;
+  if (!versionName || versionName.length > MAX_VERSION_NAME_LENGTH || /[\r\n<>]/.test(versionName)) return false;
+  if (!Number.isSafeInteger(versionCode) || versionCode < 1) return false;
+  if (!normalizeSha256(apk.apkSha256 || "") || !normalizeSha256(apk.signatureSha256 || "")) return false;
+  const mode = String(apk.artifactStorageMode || ARTIFACT_STORAGE_MODE).trim().toLowerCase();
+  if (mode === "firebase" && firebaseEnabled && String(apk.apkStoragePath || "").trim()) return true;
+  return isPublicArtifactUrl(apk.apkUrl);
+}
+
+async function getLatestPublicRelease(packageName) {
+  const safePackage = String(packageName || "").trim();
+  if (!publicSharePackageIsValid(safePackage) || safePackage.length > MAX_PACKAGE_LENGTH) return null;
+  const releases = await Apk.find({ packageName: safePackage, status: "published" })
+    .sort({ versionCode: -1, publishedAt: -1, createdAt: -1 }).limit(10).lean();
+  for (const release of releases) if (publicReleaseIsUsable(release)) return release;
+  return null;
+}
+
+async function getPublicArtifactUrl(apk) {
+  if (!apk) return "";
+  const mode = String(apk.artifactStorageMode || ARTIFACT_STORAGE_MODE).trim().toLowerCase();
+  if (mode === "firebase" && firebaseEnabled && String(apk.apkStoragePath || "").trim()) return firebaseGetSignedUrl(apk.apkStoragePath);
+  const url = String(apk.apkUrl || "").trim();
+  return isPublicArtifactUrl(url) ? url : "";
+}
+
+function publicCacheHeaders(res) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+}
+
 
 function safeDate(value) {
   if (!value) return "N/A"; const date = new Date(value); if (Number.isNaN(date.getTime())) return String(value);
@@ -2781,6 +2854,24 @@ app.get("/api/dashboard", requireApiLogin, async (req, res) => {
     });
   } catch (err) { console.error("Dashboard API error:", err.message); return res.status(500).json({ success: false }); }
 });
+
+/* =========================================================
+   PUBLIC RD STORE SHARE / ANDROID APP LINKS
+========================================================= */
+const SHARE_PAGE_STYLES = `<style nonce="__CSP_NONCE__">:root{--bg:#f5f7fb;--surface:#fff;--text:#101828;--muted:#667085;--brand:#2563eb;--border:#e4e7ec;--ok:#28724a}*{box-sizing:border-box;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{margin:0;background:radial-gradient(circle at top,#eef4ff 0,#f5f7fb 45%,#eef1f5 100%);color:var(--text)}.wrap{max-width:720px;margin:0 auto;padding:28px 18px 42px}.brand{display:flex;align-items:center;gap:12px;margin-bottom:22px}.brand-icon{width:52px;height:52px;border-radius:16px;background:#eef3ff;border:1px solid #d9e3ff;display:grid;place-items:center;font-weight:800;color:var(--brand)}.brand-name{font-size:18px;font-weight:800}.brand-sub{font-size:12px;color:var(--muted);margin-top:2px}.card{background:var(--surface);border:1px solid var(--border);border-radius:26px;padding:24px;box-shadow:0 18px 50px rgba(16,24,40,.08)}.app-head{display:flex;align-items:center;gap:16px}.icon{width:82px;height:82px;border-radius:21px;object-fit:cover;background:#f2f4f7;border:1px solid var(--border)}.title{font-size:25px;line-height:1.15;margin:0 0 6px}.meta{font-size:13px;color:var(--muted);word-break:break-word}.desc{margin:22px 0 0;font-size:14px;line-height:1.7;color:#475467;white-space:pre-wrap}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:22px}.btn{display:flex;align-items:center;justify-content:center;min-height:50px;padding:0 16px;border-radius:15px;text-decoration:none;font-weight:750;font-size:14px;border:1px solid var(--border)}.btn-primary{background:var(--brand);border-color:var(--brand);color:#fff}.btn-secondary{background:#f8fafc;color:var(--text)}.info{margin-top:18px;padding:15px;border:1px solid var(--border);border-radius:17px;background:#fafbfc;font-size:12px;line-height:1.6;color:var(--muted)}.security{margin-top:10px;color:var(--ok)}.foot{margin-top:18px;text-align:center;font-size:11px;color:#98a2b3}@media(max-width:560px){.card{padding:19px;border-radius:22px}.title{font-size:22px}.actions{grid-template-columns:1fr}.icon{width:72px;height:72px}}</style>`;
+function renderSharePage(apk) {
+  const packageName=String(apk.packageName||"").trim(), appName=String(apk.appName||packageName).trim(), versionName=String(apk.versionName||"").trim(), versionCode=String(apk.versionCode||"").trim();
+  const iconUrl=isPublicArtifactUrl(apk.iconUrl||"")?String(apk.iconUrl).trim():"", description=String(apk.description||"").trim();
+  const shareUrl=publicShareUrlForPackage(packageName), downloadUrl=PUBLIC_SHARE_ORIGIN+"/download/app/"+encodeURIComponent(packageName), isStore=packageName===RDSTORE_SHARE_PACKAGE;
+  const title=isStore?"RD Store":appName, subtitle=isStore?"Verified Android apps • Simple access":"Available on RD Store";
+  const iconHtml=iconUrl?`<img class="icon" src="${escapeHtml(iconUrl)}" alt="${escapeHtml(title)} icon">`:`<div class="icon" aria-hidden="true"></div>`;
+  const info=isStore?"Install RD Store to open shared app links directly in the store.":"If RD Store is installed and the domain is verified, Android can open this same link directly in RD Store.";
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><link rel="canonical" href="${escapeHtml(shareUrl)}"><title>${escapeHtml(title)} • RD Store</title>${SHARE_PAGE_STYLES}</head><body><main class="wrap"><div class="brand"><div class="brand-icon">RD</div><div><div class="brand-name">RD Store</div><div class="brand-sub">Verified Android app catalog</div></div></div><section class="card"><div class="app-head">${iconHtml}<div><h1 class="title">${escapeHtml(title)}</h1><div class="meta">${escapeHtml(subtitle)}</div>${!isStore?`<div class="meta">v${escapeHtml(versionName)} • Version code ${escapeHtml(versionCode)}</div>`:""}</div></div>${description?`<p class="desc">${escapeHtml(description)}</p>`:""}<div class="actions"><a class="btn btn-primary" href="${escapeHtml(downloadUrl)}">${isStore?"Download RD Store":"Download APK"}</a>${isStore?"":`<a class="btn btn-secondary" href="${escapeHtml(publicShareUrlForPackage(RDSTORE_SHARE_PACKAGE))}">Get RD Store</a>`}</div><div class="info">${escapeHtml(info)}<div class="security">✓ Published release • ✓ SHA-256 metadata • ✓ HTTPS</div></div></section><div class="foot">RD Store • Share link</div></main></body></html>`;
+}
+app.get("/.well-known/assetlinks.json",apiLimiter,async(req,res)=>{try{const fingerprints=RDSTORE_SHA256_CERT_FINGERPRINT.split(",").map(x=>x.trim().toUpperCase()).filter(x=>/^[A-F0-9]{2}(?::[A-F0-9]{2}){31}$/.test(x));if(!fingerprints.length)return res.status(503).type("application/json").set("Cache-Control","no-store").json({error:"RDSTORE_SHA256_CERT_FINGERPRINT is not configured."});publicCacheHeaders(res);return res.status(200).set("Cache-Control","public, max-age=3600").json([{relation:["delegate_permission/common.handle_all_urls"],target:{namespace:"android_app",package_name:RDSTORE_SHARE_PACKAGE,sha256_cert_fingerprints:fingerprints}}]);}catch(err){console.error("assetlinks error:",err.message);return res.status(500).json({error:"Failed to build asset links."});}});
+app.get("/app/:packageName",apiLimiter,async(req,res)=>{try{const packageName=String(req.params.packageName||"").trim();if(!publicSharePackageIsValid(packageName)||packageName.length>MAX_PACKAGE_LENGTH)return res.status(400).send("Invalid app package name.");const release=await getLatestPublicRelease(packageName);if(!release)return res.status(404).send("This app is not currently available as a published RD Store release.");publicCacheHeaders(res);return res.status(200).send(renderSharePage(release));}catch(err){console.error("Share page error:",err.message);return res.status(500).send("Unable to open this RD Store link right now.");}});
+app.get("/download/app/:packageName",apiLimiter,async(req,res)=>{try{const packageName=String(req.params.packageName||"").trim();if(!publicSharePackageIsValid(packageName)||packageName.length>MAX_PACKAGE_LENGTH)return res.status(400).send("Invalid app package name.");const release=await getLatestPublicRelease(packageName);if(!release)return res.status(404).send("No published APK is available for this app.");const artifactUrl=await getPublicArtifactUrl(release);if(!artifactUrl)return res.status(404).send("The published APK artifact is currently unavailable.");publicCacheHeaders(res);return res.redirect(302,artifactUrl);}catch(err){console.error("Public artifact redirect error:",err.message);return res.status(503).send("The APK download is temporarily unavailable.");}});
+app.get("/download/rdstore",apiLimiter,async(req,res)=>{try{const release=await getLatestPublicRelease(RDSTORE_SHARE_PACKAGE);if(!release)return res.status(404).send("RD Store has no published APK release yet.");const artifactUrl=await getPublicArtifactUrl(release);if(!artifactUrl)return res.status(404).send("RD Store APK is currently unavailable.");publicCacheHeaders(res);return res.redirect(302,artifactUrl);}catch(err){console.error("RD Store download redirect error:",err.message);return res.status(503).send("RD Store download is temporarily unavailable.");}});
 
 /* =========================================================
    DASHBOARD PAGE
