@@ -88,6 +88,7 @@ const GITHUB_API_BASE = String(process.env.GITHUB_API_BASE || "https://api.githu
 const GITHUB_RELEASE_PREFIX = String(process.env.GITHUB_RELEASE_PREFIX || "apk").trim().substring(0, 40);
 const TRUST_PROXY = String(process.env.TRUST_PROXY || "false").trim();
 const MAX_ARTIFACT_DOWNLOAD_BYTES = (() => { const n = Number(process.env.MAX_ARTIFACT_DOWNLOAD_BYTES || APK_MAX_SIZE_BYTES); return Number.isFinite(n) ? Math.max(APK_MAX_SIZE_BYTES, n) : APK_MAX_SIZE_BYTES; })();
+const REQUIRE_HTTPS_ARTIFACT_URLS = IS_PRODUCTION && String(process.env.ALLOW_HTTP_ARTIFACT_URLS || "false").trim().toLowerCase() !== "true";
 
 const CUSTOM_STORAGE_UPLOAD_URL_TEMPLATE = String(process.env.CUSTOM_STORAGE_UPLOAD_URL_TEMPLATE || "").trim();
 const CUSTOM_STORAGE_DOWNLOAD_URL_TEMPLATE = String(process.env.CUSTOM_STORAGE_DOWNLOAD_URL_TEMPLATE || "").trim();
@@ -439,7 +440,7 @@ function isValidAppId(value) { const s = String(value || "").trim(); return s.le
 function isValidVersionName(value) { const s = String(value || "").trim(); return s.length > 0 && s.length <= MAX_VERSION_NAME_LENGTH && !/[\r\n<>]/.test(s); }
 function parsePositiveVersionCode(value) { const s = String(value ?? "").trim(); if (!/^\d+$/.test(s)) return null; const n = Number(s); if (!Number.isSafeInteger(n) || n < 1) return null; return n; }
 function normalizeSha256(value) { const s = String(value ?? "").trim().toLowerCase(); if (!s) return ""; return /^[a-f0-9]{64}$/.test(s) ? s : null; }
-function isValidHttpUrl(value) { try { const u = new URL(String(value || "").trim()); return (u.protocol === "https:" || u.protocol === "http:") && !!u.hostname; } catch (err) { return false; } }
+function isValidHttpUrl(value, options = {}) { try { const raw = String(value || "").trim(); if (!raw || raw.length > MAX_URL_LENGTH) return false; const u = new URL(raw); if (!["https:", "http:"].includes(u.protocol) || !u.hostname) return false; if (u.username || u.password || u.hash) return false; if (options.requireHttps && u.protocol !== "https:") return false; return true; } catch (err) { return false; } }
 
 function safeDate(value) {
   if (!value) return "N/A"; const date = new Date(value); if (Number.isNaN(date.getTime())) return String(value);
@@ -548,7 +549,9 @@ async function handleTracking(req, res) {
   const deviceId = safeString(req.query.id || req.body?.id, MAX_DEVICE_ID_LENGTH);
   const appId = safeString(req.query.appId || req.body?.appId, MAX_APP_ID_LENGTH) || "default_app";
   let rawAction = String(req.query.action || req.body?.action || req.query.status || req.body?.status || "start").trim().toLowerCase();
-  if (rawAction === "offline") rawAction = "stop"; const action = ["start", "ping", "stop"].includes(rawAction) ? rawAction : "start";
+  if (rawAction === "offline") rawAction = "stop";
+  if (!["start", "ping", "stop"].includes(rawAction)) return res.status(400).json({ status: "ERROR", message: "ACTION_INVALID" });
+  const action = rawAction;
 
   if (!deviceId) return res.status(400).json({ status: "ERROR", message: "DEVICE_ID_MISSING" });
   if (!isValidAppId(appId)) return res.status(400).json({ status: "ERROR", message: "APP_ID_INVALID" });
@@ -1015,6 +1018,8 @@ async function resolvePublicAddress(hostname) {
 async function assertSafeArtifactUrl(rawUrl) {
   const parsed = new URL(String(rawUrl || ""));
   if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Artifact URL must use HTTP or HTTPS.");
+  if (REQUIRE_HTTPS_ARTIFACT_URLS && parsed.protocol !== "https:") throw new Error("HTTPS is required for artifact URLs in production.");
+  if (parsed.username || parsed.password || parsed.hash) throw new Error("Artifact URL must not contain credentials or a fragment.");
   const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   const blockedHostnames = new Set(["localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback", "broadcasthost"]);
   if (blockedHostnames.has(hostname) || hostname.endsWith(".localhost") || hostname.endsWith(".local") || hostname.endsWith(".internal")) throw new Error("Private/local artifact hosts are not allowed.");
@@ -1867,54 +1872,89 @@ staleRecoveryInterval.unref();
 app.get("/api/updates", apiLimiter, async (req, res) => {
   try {
     const apks = await Apk.aggregate([
-      { $match: { status: "published" } },
+      {
+        $match: {
+          status: "published",
+          packageName: { $type: "string", $ne: "" },
+          versionName: { $type: "string", $ne: "" },
+          versionCode: { $type: "number", $gte: 1 },
+          apkUrl: { $type: "string", $ne: "" },
+          apkSha256: { $regex: /^[a-f0-9]{64}$/i },
+          signatureSha256: { $regex: /^[a-f0-9]{64}$/i }
+        }
+      },
       { $sort: { packageName: 1, versionCode: -1, publishedAt: -1, createdAt: -1 } },
       { $group: { _id: "$packageName", doc: { $first: "$$ROOT" } } },
       { $replaceRoot: { newRoot: "$doc" } },
       { $sort: { packageName: 1 } }
     ]);
 
-    const normalized = await Promise.all(apks.map(async (apk) => {
-      const apkUrl = (ARTIFACT_STORAGE_MODE === "firebase" && firebaseEnabled && apk.apkStoragePath)
-        ? await firebaseGetSignedUrl(apk.apkStoragePath)
-        : apk.apkUrl;
-      const patchUrl = (ARTIFACT_STORAGE_MODE === "firebase" && firebaseEnabled && apk.patchStoragePath)
-        ? await firebaseGetSignedUrl(apk.patchStoragePath)
-        : (apk.patchUrl || "");
+    const normalized = [];
 
-      return {
-        appName: apk.appName,
-        description: apk.description || "",
-        packageName: apk.packageName,
-        versionName: apk.versionName,
-        versionCode: apk.versionCode,
-        apkUrl,
-        apkSha256: apk.apkSha256 || "",
-        apkSize: Number(apk.apkSizeBytes || apk.apkSize || 0),
-        apkSizeBytes: Number(apk.apkSizeBytes || apk.apkSize || 0),
-        patchUrl,
-        patchSha256: apk.patchSha256 || "",
-        patchSize: Number(apk.patchSizeBytes || apk.patchSize || 0),
-        patchSizeBytes: Number(apk.patchSizeBytes || apk.patchSize || 0),
-        patchFromVersionCode: apk.patchFromVersionCode ?? null,
-        patchToVersionCode: apk.patchToVersionCode ?? null,
-        signatureSha256: apk.signatureSha256 || "",
-        iconUrl: apk.iconUrl || "",
-        screenshots: apk.screenshots || [],
-        publishedAt: apk.publishedAt || apk.createdAt || null,
-        previousVersionCode: apk.previousVersionCode ?? null,
-        patchFromSha256: apk.baseApkSha256 || "",
-        patchToSha256: apk.targetApkSha256 || apk.apkSha256 || "",
-        baseApkSha256: apk.baseApkSha256 || "",
-        targetApkSha256: apk.targetApkSha256 || apk.apkSha256 || "",
-        apkStoragePath: apk.apkStoragePath || "",
-        patchStoragePath: apk.patchStoragePath || "",
-        releaseId: String(apk._id)
-      };
-    }));
+    for (const apk of apks) {
+      try {
+        const releaseMode = String(apk.artifactStorageMode || ARTIFACT_STORAGE_MODE).trim().toLowerCase();
+        const usesFirebase = releaseMode === "firebase";
+
+        if (!isValidHttpUrl(apk.apkUrl, { requireHttps: REQUIRE_HTTPS_ARTIFACT_URLS })) {
+          console.error(`Skipping invalid published APK URL for ${apk.packageName} v${apk.versionCode}.`);
+          continue;
+        }
+
+        const apkUrl = (usesFirebase && firebaseEnabled && apk.apkStoragePath)
+          ? await firebaseGetSignedUrl(apk.apkStoragePath)
+          : apk.apkUrl;
+
+        let patchUrl = apk.patchUrl || "";
+        if (patchUrl && !isValidHttpUrl(patchUrl, { requireHttps: REQUIRE_HTTPS_ARTIFACT_URLS })) {
+          console.error(`Skipping invalid published patch URL for ${apk.packageName} v${apk.versionCode}.`);
+          continue;
+        }
+
+        if (usesFirebase && firebaseEnabled && apk.patchStoragePath) {
+          patchUrl = await firebaseGetSignedUrl(apk.patchStoragePath);
+        }
+
+        normalized.push({
+          appName: apk.appName,
+          description: apk.description || "",
+          packageName: apk.packageName,
+          versionName: apk.versionName,
+          versionCode: apk.versionCode,
+          apkUrl,
+          apkSha256: apk.apkSha256 || "",
+          apkSize: Number(apk.apkSizeBytes || apk.apkSize || 0),
+          apkSizeBytes: Number(apk.apkSizeBytes || apk.apkSize || 0),
+          patchUrl,
+          patchSha256: apk.patchSha256 || "",
+          patchSize: Number(apk.patchSizeBytes || apk.patchSize || 0),
+          patchSizeBytes: Number(apk.patchSizeBytes || apk.patchSize || 0),
+          patchFromVersionCode: apk.patchFromVersionCode ?? null,
+          patchToVersionCode: apk.patchToVersionCode ?? null,
+          signatureSha256: apk.signatureSha256 || "",
+          iconUrl: apk.iconUrl || "",
+          screenshots: apk.screenshots || [],
+          publishedAt: apk.publishedAt || apk.createdAt || null,
+          previousVersionCode: apk.previousVersionCode ?? null,
+          patchFromSha256: apk.baseApkSha256 || "",
+          patchToSha256: apk.targetApkSha256 || apk.apkSha256 || "",
+          baseApkSha256: apk.baseApkSha256 || "",
+          targetApkSha256: apk.targetApkSha256 || apk.apkSha256 || "",
+          apkStoragePath: apk.apkStoragePath || "",
+          patchStoragePath: apk.patchStoragePath || "",
+          artifactStorageMode: releaseMode,
+          releaseId: String(apk._id)
+        });
+      } catch (releaseErr) {
+        console.error(`Skipping unusable published release ${apk.packageName} v${apk.versionCode}:`, releaseErr.message);
+      }
+    }
 
     return res.status(200).json(normalized);
-  } catch (err) { console.error("Updates API error:", err.message); return res.status(500).json({ error: "Failed to fetch updates" }); }
+  } catch (err) {
+    console.error("Updates API error:", err.message);
+    return res.status(500).json({ error: "Failed to fetch updates" });
+  }
 });
 
 app.get("/api/releases", requireApiLogin, async (req, res) => {
@@ -2384,8 +2424,8 @@ app.post("/action/apk/manual-attach", requireLogin, adminActionLimiter, csrfProt
 
     const apkUrl = safeString(req.body.apkUrl, MAX_URL_LENGTH);
     const patchUrl = safeString(req.body.patchUrl, MAX_URL_LENGTH);
-    if (!isValidHttpUrl(apkUrl)) return res.status(400).send("A valid APK HTTP/HTTPS URL is required.");
-    if (job.patchGenerated && !isValidHttpUrl(patchUrl)) return res.status(400).send("A valid Smart Patch HTTP/HTTPS URL is required.");
+    if (!isValidHttpUrl(apkUrl, { requireHttps: REQUIRE_HTTPS_ARTIFACT_URLS })) return res.status(400).send(REQUIRE_HTTPS_ARTIFACT_URLS ? "A valid HTTPS APK URL is required in production." : "A valid APK HTTP/HTTPS URL is required.");
+    if (job.patchGenerated && !isValidHttpUrl(patchUrl, { requireHttps: REQUIRE_HTTPS_ARTIFACT_URLS })) return res.status(400).send(REQUIRE_HTTPS_ARTIFACT_URLS ? "A valid HTTPS Smart Patch URL is required in production." : "A valid Smart Patch HTTP/HTTPS URL is required.");
     if (!job.patchGenerated && patchUrl) return res.status(400).send("This release does not expect a Smart Patch.");
 
     const apkVerifyPath = path.join(TEMP_UPLOAD_DIR, `manual-verify-${crypto.randomBytes(8).toString("hex")}.apk`);
