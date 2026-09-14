@@ -101,6 +101,11 @@ const FIREBASE_STORAGE_BUCKET = String(process.env.FIREBASE_STORAGE_BUCKET || ""
 const FIREBASE_SERVICE_ACCOUNT_JSON = String(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "").trim();
 const FIREBASE_SIGNED_URL_EXPIRY_MS = Math.min(1000 * 60 * 60 * 24 * 6, Math.max(60000, Number(process.env.FIREBASE_SIGNED_URL_EXPIRY_MS || 1000 * 60 * 60 * 24 * 6)));
 
+/* ---- FCM update notifications (additive; independent from artifact storage) ---- */
+const FCM_NOTIFICATION_ENABLED = String(process.env.FCM_NOTIFICATION_ENABLED || "false").trim().toLowerCase() === "true";
+const FCM_SERVICE_ACCOUNT_JSON = String(process.env.FCM_SERVICE_ACCOUNT_JSON || "").trim();
+const FCM_PROJECT_ID = String(process.env.FCM_PROJECT_ID || "").trim();
+
 const GITHUB_TOKEN = String(process.env.GITHUB_TOKEN || "").trim();
 const GITHUB_OWNER = String(process.env.GITHUB_OWNER || "").trim();
 const GITHUB_REPO = String(process.env.GITHUB_REPO || "").trim();
@@ -109,11 +114,6 @@ const GITHUB_RELEASE_PREFIX = String(process.env.GITHUB_RELEASE_PREFIX || "apk")
 const TRUST_PROXY = String(process.env.TRUST_PROXY || "false").trim();
 const MAX_ARTIFACT_DOWNLOAD_BYTES = (() => { const n = Number(process.env.MAX_ARTIFACT_DOWNLOAD_BYTES || APK_MAX_SIZE_BYTES); return Number.isFinite(n) ? Math.max(APK_MAX_SIZE_BYTES, n) : APK_MAX_SIZE_BYTES; })();
 const REQUIRE_HTTPS_ARTIFACT_URLS = IS_PRODUCTION && String(process.env.ALLOW_HTTP_ARTIFACT_URLS || "false").trim().toLowerCase() !== "true";
-
-/* ---- RD Store FCM update notifications (additive; independent of artifact storage) ---- */
-const FCM_SERVICE_ACCOUNT_JSON = String(process.env.FCM_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "").trim();
-const FCM_PROJECT_ID = String(process.env.FCM_PROJECT_ID || "").trim();
-const FCM_NOTIFICATION_ENABLED = String(process.env.FCM_NOTIFICATION_ENABLED || "true").trim().toLowerCase() === "true";
 
 const CUSTOM_STORAGE_UPLOAD_URL_TEMPLATE = String(process.env.CUSTOM_STORAGE_UPLOAD_URL_TEMPLATE || "").trim();
 const CUSTOM_STORAGE_DOWNLOAD_URL_TEMPLATE = String(process.env.CUSTOM_STORAGE_DOWNLOAD_URL_TEMPLATE || "").trim();
@@ -171,6 +171,44 @@ try {
   console.error("Firebase initialization error (release pipeline disabled):", err.message);
   firebaseBucket = null;
   firebaseEnabled = false;
+}
+
+/* ---- Firebase Cloud Messaging initialization ---- */
+let fcmMessaging = null;
+let fcmEnabled = false;
+try {
+  if (FCM_NOTIFICATION_ENABLED && FCM_SERVICE_ACCOUNT_JSON) {
+    const admin = require("firebase-admin");
+    let serviceAccount;
+    try {
+      const raw = FCM_SERVICE_ACCOUNT_JSON.trim().startsWith("{")
+        ? FCM_SERVICE_ACCOUNT_JSON
+        : Buffer.from(FCM_SERVICE_ACCOUNT_JSON, "base64").toString("utf8");
+      serviceAccount = JSON.parse(raw);
+    } catch (parseErr) {
+      throw new Error("FCM_SERVICE_ACCOUNT_JSON is not valid JSON or base64-JSON: " + parseErr.message);
+    }
+    if (!serviceAccount || typeof serviceAccount !== "object" || !serviceAccount.client_email || !serviceAccount.private_key || !serviceAccount.project_id) {
+      throw new Error("FCM service account is missing project_id, client_email, or private_key.");
+    }
+    const appName = "rd-store-fcm";
+    const existing = admin.apps.find((item) => item && item.name === appName);
+    const fcmApp = existing || admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      projectId: FCM_PROJECT_ID || serviceAccount.project_id
+    }, appName);
+    fcmMessaging = fcmApp.messaging();
+    fcmEnabled = true;
+    console.log("Firebase Cloud Messaging initialized: project=" + (FCM_PROJECT_ID || serviceAccount.project_id));
+  } else if (FCM_NOTIFICATION_ENABLED) {
+    console.warn("FCM notifications are enabled but FCM_SERVICE_ACCOUNT_JSON is missing. Notifications are disabled.");
+  } else {
+    console.log("FCM update notifications are OFF.");
+  }
+} catch (err) {
+  console.error("FCM initialization error (notifications disabled):", err.message);
+  fcmMessaging = null;
+  fcmEnabled = false;
 }
 
 if (TRUST_PROXY === "false" || TRUST_PROXY === "0") app.set("trust proxy", false);
@@ -298,6 +336,50 @@ class ReleaseSecurityError extends Error {
     super(message);
     this.name = "ReleaseSecurityError";
     this.code = code;
+  }
+}
+
+/* ---- FCM helpers ---- */
+function getFcmTopicForPackage(packageName) {
+  const pkg = String(packageName || "").trim();
+  if (!isValidAppId(pkg) || pkg.length > MAX_PACKAGE_LENGTH) return null;
+  const topic = "rdstore_app_" + pkg;
+  return topic.length <= 900 ? topic : null;
+}
+
+async function sendUpdateNotification(packageName, appName, versionName, versionCode) {
+  if (!fcmEnabled || !fcmMessaging) return { sent: false, skipped: true, reason: "FCM_DISABLED" };
+  const topic = getFcmTopicForPackage(packageName);
+  if (!topic) return { sent: false, skipped: true, reason: "PACKAGE_INVALID" };
+  try {
+    const title = `${String(appName || packageName).trim() || packageName} update available`;
+    const versionLabel = String(versionName || "").trim();
+    const body = versionLabel ? `Version ${versionLabel} is now available.` : "A new version is now available.";
+    const shareUrl = `${PUBLIC_SHARE_ORIGIN}/app/${encodeURIComponent(packageName)}`;
+    const messageId = await fcmMessaging.send({
+      topic,
+      notification: { title, body },
+      data: {
+        type: "app_update",
+        packageName: String(packageName),
+        appName: String(appName || packageName),
+        versionName: versionLabel,
+        versionCode: String(Number(versionCode) || 0),
+        shareUrl
+      },
+      android: {
+        priority: "high",
+        notification: {
+          channelId: "rd_store_updates",
+          clickAction: "RD_STORE_APP_UPDATE"
+        }
+      }
+    });
+    console.log(`FCM update notification sent: ${packageName} v${versionLabel || versionCode} topic=${topic} messageId=${messageId}`);
+    return { sent: true, messageId };
+  } catch (err) {
+    console.error(`FCM update notification failed for ${packageName} v${versionLabel || versionCode}:`, err.message);
+    return { sent: false, skipped: false, error: err.message };
   }
 }
 
@@ -440,19 +522,6 @@ ReleaseJobSchema.index({ status: 1, heartbeatAt: 1 });
 ReleaseJobSchema.index({ extractedPackageName: 1, extractedVersionCode: 1 });
 ReleaseJobSchema.index({ status: 1, stage: 1, stageUpdatedAt: 1 });
 
-const NotificationSubscriptionSchema = new mongoose.Schema({
-  token: { type: String, required: true, trim: true, maxlength: 4096 },
-  packageName: { type: String, required: true, trim: true, maxlength: MAX_PACKAGE_LENGTH, index: true },
-  appName: { type: String, default: "", trim: true, maxlength: MAX_APP_NAME_LENGTH },
-  active: { type: Boolean, default: true, index: true },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now, index: true }
-}, { versionKey: false });
-NotificationSubscriptionSchema.index({ token: 1, packageName: 1 }, { unique: true, name: "unique_fcm_token_package" });
-NotificationSubscriptionSchema.index({ packageName: 1, active: 1, updatedAt: -1 });
-
-const NotificationSubscription = mongoose.model("NotificationSubscription", NotificationSubscriptionSchema);
-
 const AppRegistry = mongoose.model("AppRegistry", AppRegistrySchema);
 const Device = mongoose.model("Device", DeviceSchema);
 const UsageSession = mongoose.model("UsageSession", SessionSchema);
@@ -594,96 +663,6 @@ async function verifyPassword(password) {
   if (input.length !== stored.length) return false; return crypto.timingSafeEqual(input, stored);
 }
 
-let fcmAdminApp = null;
-
-function getFcmAdminApp() {
-  if (!FCM_NOTIFICATION_ENABLED) return null;
-  if (fcmAdminApp) return fcmAdminApp;
-  try {
-    const admin = require("firebase-admin");
-    if (admin.apps && admin.apps.length) {
-      fcmAdminApp = admin.app();
-      return fcmAdminApp;
-    }
-    if (!FCM_SERVICE_ACCOUNT_JSON) {
-      console.warn("FCM notifications disabled: FCM_SERVICE_ACCOUNT_JSON/FIREBASE_SERVICE_ACCOUNT_JSON is missing.");
-      return null;
-    }
-    const raw = FCM_SERVICE_ACCOUNT_JSON.trim().startsWith("{")
-      ? FCM_SERVICE_ACCOUNT_JSON
-      : Buffer.from(FCM_SERVICE_ACCOUNT_JSON, "base64").toString("utf8");
-    const serviceAccount = JSON.parse(raw);
-    fcmAdminApp = admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      ...(FCM_PROJECT_ID ? { projectId: FCM_PROJECT_ID } : {})
-    }, "rdstore-notifications");
-    return fcmAdminApp;
-  } catch (err) {
-    console.error("FCM initialization error:", err.message);
-    return null;
-  }
-}
-
-function isValidFcmToken(token) {
-  const s = String(token || "").trim();
-  return s.length >= 10 && s.length <= 4096 && !/[\r\n]/.test(s);
-}
-
-async function notifyPackageUpdate(packageName, appName, versionName, versionCode) {
-  if (!FCM_NOTIFICATION_ENABLED) return;
-  const adminApp = getFcmAdminApp();
-  if (!adminApp) return;
-  const safePackage = String(packageName || "").trim();
-  if (!publicSharePackageIsValid(safePackage)) return;
-
-  const subscriptions = await NotificationSubscription.find({ packageName: safePackage, active: true })
-    .select({ _id: 1, token: 1 }).lean();
-  if (!subscriptions.length) return;
-
-  const messaging = adminApp.messaging();
-  const title = String(appName || safePackage).trim().substring(0, 100) + " update available";
-  const body = "Version " + String(versionName || versionCode || "new") + " is now available in RD Store.";
-  const invalidIds = [];
-
-  for (let i = 0; i < subscriptions.length; i += 500) {
-    const batch = subscriptions.slice(i, i + 500);
-    const tokens = batch.map(x => x.token).filter(isValidFcmToken);
-    if (!tokens.length) continue;
-    try {
-      const result = await messaging.sendEachForMulticast({
-        tokens,
-        notification: { title, body },
-        data: {
-          type: "APP_UPDATE",
-          packageName: safePackage,
-          appName: String(appName || safePackage).substring(0, MAX_APP_NAME_LENGTH),
-          versionName: String(versionName || "").substring(0, MAX_VERSION_NAME_LENGTH),
-          versionCode: String(Number(versionCode) || ""),
-          shareUrl: publicShareUrlForPackage(safePackage)
-        },
-        android: {
-          priority: "high",
-          notification: { channelId: "rd_store_updates", clickAction: "RD_STORE_APP_UPDATE" }
-        }
-      });
-      result.responses.forEach((response, idx) => {
-        if (!response.success) {
-          const code = String(response.error && response.error.code || "");
-          if (code.includes("registration-token-not-registered") || code.includes("invalid-registration-token")) {
-            const token = tokens[idx];
-            const sub = batch.find(x => x.token === token);
-            if (sub) invalidIds.push(sub._id);
-          }
-        }
-      });
-      console.log(`FCM update notification: ${safePackage} v${versionName || versionCode} -> ${result.successCount}/${tokens.length}`);
-    } catch (err) {
-      console.error("FCM notification send error:", err.message);
-    }
-  }
-  if (invalidIds.length) await NotificationSubscription.deleteMany({ _id: { $in: invalidIds } }).catch(() => {});
-}
-
 async function closeOnlineSession(deviceId, appId, reason, timestamp) {
   const now = Number(timestamp) || Date.now(); const nowDate = new Date(now);
   return UsageSession.findOneAndUpdate(
@@ -725,38 +704,6 @@ async function assertRegisteredApp(appId) {
   }
   return true;
 }
-
-app.post("/api/notifications/register", trackingLimiter, async (req, res) => {
-  try {
-    const token = String(req.body?.token || "").trim();
-    const packageName = String(req.body?.packageName || "").trim();
-    const appName = safeString(req.body?.appName || "", MAX_APP_NAME_LENGTH);
-    if (!isValidFcmToken(token)) return res.status(400).json({ success: false, error: "FCM_TOKEN_INVALID" });
-    if (!publicSharePackageIsValid(packageName) || packageName.length > MAX_PACKAGE_LENGTH) return res.status(400).json({ success: false, error: "PACKAGE_INVALID" });
-    if (mongoose.connection.readyState !== 1) return res.status(503).json({ success: false, error: "DATABASE_OFFLINE" });
-    await NotificationSubscription.findOneAndUpdate(
-      { token, packageName },
-      { $set: { appName, active: true, updatedAt: new Date() }, $setOnInsert: { token, packageName, createdAt: new Date() } },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-    return res.json({ success: true });
-  } catch (err) {
-    console.error("FCM registration error:", err.message);
-    return res.status(500).json({ success: false, error: "FCM_REGISTRATION_FAILED" });
-  }
-});
-
-app.post("/api/notifications/unregister", trackingLimiter, async (req, res) => {
-  try {
-    const token = String(req.body?.token || "").trim();
-    if (!isValidFcmToken(token)) return res.status(400).json({ success: false, error: "FCM_TOKEN_INVALID" });
-    await NotificationSubscription.deleteMany({ token });
-    return res.json({ success: true });
-  } catch (err) {
-    console.error("FCM unregister error:", err.message);
-    return res.status(500).json({ success: false, error: "FCM_UNREGISTER_FAILED" });
-  }
-});
 
 async function handleTracking(req, res) {
   const deviceId = safeString(req.query.id || req.body?.id, MAX_DEVICE_ID_LENGTH);
@@ -2021,8 +1968,7 @@ async function processReleaseJob(job) {
 
     publicationCommitted = true;
     console.log(`Published release ${metadata.packageName} v${metadata.versionCode} (job ${job._id}) using ${ARTIFACT_STORAGE_MODE} storage.`);
-    notifyPackageUpdate(metadata.packageName, metadata.appName, metadata.versionName, metadata.versionCode)
-      .catch(err => console.error("Post-publication FCM notification error:", err.message));
+    await sendUpdateNotification(metadata.packageName, metadata.appName, metadata.versionName, metadata.versionCode);
   } catch (err) {
     if (err && err.code === "RELEASE_JOB_OWNERSHIP_LOST") {
       ownershipState.ownershipLost = true;
@@ -2763,8 +2709,7 @@ app.post("/action/apk/manual-attach", requireLogin, adminActionLimiter, csrfProt
       await session.endSession();
     }
 
-    notifyPackageUpdate(job.extractedPackageName, job.extractedAppName, job.extractedVersionName, job.extractedVersionCode)
-      .catch(err => console.error("Post-manual-publication FCM notification error:", err.message));
+    await sendUpdateNotification(job.extractedPackageName, job.extractedAppName, job.extractedVersionName, job.extractedVersionCode);
     await safeUnlink(job.manualApkTempPath || job.apkTempPath);
     await safeUnlink(job.manualPatchTempPath);
     return res.redirect("/apks");
@@ -3195,7 +3140,6 @@ async function startServer() {
       await AppRegistry.syncIndexes(); 
       await ReleaseJob.syncIndexes();
       await ReleasePackageLock.syncIndexes();
-      await NotificationSubscription.syncIndexes();
     } catch (err) {
       console.error("FATAL: MongoDB index synchronization failed:", err);
       process.exit(1);
