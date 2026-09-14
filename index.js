@@ -178,7 +178,8 @@ let fcmMessaging = null;
 let fcmEnabled = false;
 try {
   if (FCM_NOTIFICATION_ENABLED && FCM_SERVICE_ACCOUNT_JSON) {
-    const admin = require("firebase-admin");
+    const { getApps, initializeApp, cert } = require("firebase-admin/app");
+    const { getMessaging } = require("firebase-admin/messaging");
     let serviceAccount;
     try {
       const raw = FCM_SERVICE_ACCOUNT_JSON.trim().startsWith("{")
@@ -192,12 +193,12 @@ try {
       throw new Error("FCM service account is missing project_id, client_email, or private_key.");
     }
     const appName = "rd-store-fcm";
-    const existing = admin.apps.find((item) => item && item.name === appName);
-    const fcmApp = existing || admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
+    const existing = getApps().find((item) => item && item.name === appName);
+    const fcmApp = existing || initializeApp({
+      credential: cert(serviceAccount),
       projectId: FCM_PROJECT_ID || serviceAccount.project_id
     }, appName);
-    fcmMessaging = fcmApp.messaging();
+    fcmMessaging = getMessaging(fcmApp);
     fcmEnabled = true;
     console.log("Firebase Cloud Messaging initialized: project=" + (FCM_PROJECT_ID || serviceAccount.project_id));
   } else if (FCM_NOTIFICATION_ENABLED) {
