@@ -2235,6 +2235,7 @@ const TOPBAR_HTML = (csrfToken) => `
     <a href="/" class="btn btn-blue">Devices</a>
     <a href="/apps" class="btn btn-orange">App Systems</a>
     <a href="/apks" class="btn btn-purple">APK Manager</a>
+    <a href="/controls" class="btn" style="background:#7c3aed;color:#fff">Remote Control</a>
     <form method="POST" action="/logout" style="margin:0"><input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}"><button class="btn btn-gray" type="submit">Logout</button></form>
   </div>
 </div>`;
