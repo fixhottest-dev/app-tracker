@@ -402,6 +402,14 @@ const DeviceSchema = new mongoose.Schema({
 }, { versionKey: false });
 DeviceSchema.index({ deviceId: 1, appId: 1 }, { unique: true });
 
+const AppControlSchema = new mongoose.Schema({
+  appId: { type: String, required: true, unique: true, index: true, trim: true, maxlength: MAX_APP_ID_LENGTH },
+  control: { type: String, enum: ["ACTIVE", "MAINTENANCE", "REDIRECT", "DISABLED", "FORCE_EXIT"], default: "ACTIVE", index: true },
+  redirectUrl: { type: String, default: "", trim: true, maxlength: MAX_URL_LENGTH },
+  message: { type: String, default: "", trim: true, maxlength: 500 },
+  updatedAt: { type: Date, default: Date.now }
+}, { versionKey: false });
+
 const SessionSchema = new mongoose.Schema({
   deviceId: { type: String, required: true, index: true, maxlength: MAX_DEVICE_ID_LENGTH },
   appId: { type: String, required: true, default: "default_app", index: true, maxlength: MAX_APP_ID_LENGTH },
@@ -525,6 +533,7 @@ ReleaseJobSchema.index({ status: 1, stage: 1, stageUpdatedAt: 1 });
 
 const AppRegistry = mongoose.model("AppRegistry", AppRegistrySchema);
 const Device = mongoose.model("Device", DeviceSchema);
+const AppControl = mongoose.model("AppControl", AppControlSchema);
 const UsageSession = mongoose.model("UsageSession", SessionSchema);
 const Apk = mongoose.model("Apk", ApkSchema);
 const ReleaseJob = mongoose.model("ReleaseJob", ReleaseJobSchema);
@@ -706,6 +715,16 @@ async function assertRegisteredApp(appId) {
   return true;
 }
 
+async function getAppControl(appId) {
+  const control = await AppControl.findOne({ appId }).lean();
+  if (!control) return { control: "ACTIVE", redirectUrl: "", message: "" };
+  return {
+    control: ["ACTIVE", "MAINTENANCE", "REDIRECT", "DISABLED", "FORCE_EXIT"].includes(String(control.control)) ? String(control.control) : "ACTIVE",
+    redirectUrl: isValidHttpUrl(control.redirectUrl || "", { requireHttps: IS_PRODUCTION }) ? String(control.redirectUrl) : "",
+    message: safeString(control.message, 500)
+  };
+}
+
 async function handleTracking(req, res) {
   const deviceId = safeString(req.query.id || req.body?.id, MAX_DEVICE_ID_LENGTH);
   const appId = safeString(req.query.appId || req.body?.appId, MAX_APP_ID_LENGTH) || "default_app";
@@ -727,21 +746,28 @@ async function handleTracking(req, res) {
       catch (err) { if (err && err.code === 11000) device = await Device.findOne({ deviceId, appId }); else throw err; }
     }
 
+    const appControl = await getAppControl(appId);
+
     if (!device || device.status !== "approved") {
       await closeOnlineSession(deviceId, appId, device && device.status === "blocked" ? "blocked" : "pending", Date.now());
-      return res.json({ status: "BLOCKED", redirectUrl: REDIRECT_URL });
+      return res.json({ status: "BLOCKED", control: appControl.control, redirectUrl: REDIRECT_URL, controlRedirectUrl: appControl.redirectUrl, message: appControl.message });
     }
 
     const now = Date.now(); const nowDate = new Date(now);
     if (action === "stop") {
       const stopped = await closeOnlineSession(deviceId, appId, "stop", now);
-      return res.json({ status: "ALLOWED", action: stopped ? "STOPPED" : "NO_ACTIVE_SESSION" });
+      return res.json({ status: "ALLOWED", control: appControl.control, action: stopped ? "STOPPED" : "NO_ACTIVE_SESSION" });
+    }
+
+    if (appControl.control !== "ACTIVE") {
+      await closeOnlineSession(deviceId, appId, appControl.control === "FORCE_EXIT" || appControl.control === "DISABLED" ? "blocked" : "stop", now);
+      return res.json({ status: "CONTROL", control: appControl.control, redirectUrl: appControl.redirectUrl, message: appControl.message });
     }
 
     let activeSession = await UsageSession.findOne({ deviceId, appId, status: "online" });
     if (activeSession) {
       activeSession.lastSeenTime = nowDate; activeSession.lastSeenTimestamp = now; await activeSession.save();
-      return res.json({ status: "ALLOWED", action: "HEARTBEAT" });
+      return res.json({ status: "ALLOWED", control: appControl.control, action: "HEARTBEAT" });
     }
 
     try { activeSession = await UsageSession.create({ deviceId, appId, startTime: nowDate, lastSeenTime: nowDate, startTimestamp: now, lastSeenTimestamp: now, status: "online" }); }
@@ -749,7 +775,7 @@ async function handleTracking(req, res) {
       if (err && err.code === 11000) { activeSession = await UsageSession.findOneAndUpdate({ deviceId, appId, status: "online" }, { $set: { lastSeenTime: nowDate, lastSeenTimestamp: now } }, { new: true }); } else { throw err; }
     }
 
-    return res.json({ status: "ALLOWED", action: "STARTED", sessionId: activeSession ? String(activeSession._id) : null });
+    return res.json({ status: "ALLOWED", control: appControl.control, action: "STARTED", sessionId: activeSession ? String(activeSession._id) : null });
   } catch (err) {
     if (err && err.code === "APP_NOT_REGISTERED") return res.status(404).json({ status: "ERROR", message: "APP_NOT_REGISTERED" });
     console.error("Tracking error:", err.message);
@@ -2031,6 +2057,47 @@ staleRecoveryInterval.unref();
 /* =========================================================
    PUBLIC APK CATALOG API
 ========================================================= */
+/* =========================================================
+   APK REMOTE CONTROL
+========================================================= */
+app.get("/controls", requireLogin, csrfProtection, async (req, res) => {
+  try {
+    const apps = await AppRegistry.find().sort({ appName: 1 }).lean();
+    const controls = await AppControl.find({}).lean();
+    const map = new Map(controls.map((item) => [item.appId, item]));
+    const rows = apps.map((item) => {
+      const c = map.get(item.appId) || { control: "ACTIVE", redirectUrl: "", message: "" };
+      const control = ["ACTIVE", "MAINTENANCE", "REDIRECT", "DISABLED", "FORCE_EXIT"].includes(c.control) ? c.control : "ACTIVE";
+      return `<tr><td><strong>${escapeHtml(item.appName)}</strong><br><code>${escapeHtml(item.appId)}</code></td><td><span class="badge ${control === "ACTIVE" ? "approved" : control === "FORCE_EXIT" || control === "DISABLED" ? "blocked" : "pending"}">${escapeHtml(control)}</span></td><td><form method="POST" action="/action/app-control" class="inline-form"><input type="hidden" name="_csrf" value="${escapeHtml(res.locals.csrfToken)}"><input type="hidden" name="appId" value="${escapeHtml(item.appId)}"><select name="control"><option${control === "ACTIVE" ? " selected" : ""}>ACTIVE</option><option${control === "MAINTENANCE" ? " selected" : ""}>MAINTENANCE</option><option${control === "REDIRECT" ? " selected" : ""}>REDIRECT</option><option${control === "DISABLED" ? " selected" : ""}>DISABLED</option><option${control === "FORCE_EXIT" ? " selected" : ""}>FORCE_EXIT</option></select><input name="redirectUrl" maxlength="1000" placeholder="HTTPS redirect URL" value="${escapeHtml(c.redirectUrl || "")}"><input name="message" maxlength="500" placeholder="Optional message" value="${escapeHtml(c.message || "")}"><button class="btn btn-blue" type="submit">Save</button></form></td></tr>`;
+    }).join("");
+    return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>APK Remote Control</title>${UI_STYLES}</head><body>${TOPBAR_HTML(res.locals.csrfToken)}<div class="container"><div class="page-title"><h1>APK Remote Control</h1><p class="status-line">Controls apply per uploaded APK package. RD Store user permissions are separate.</p></div><div class="card"><div class="table-wrap"><table><thead><tr><th>App</th><th>Current Control</th><th>Change</th></tr></thead><tbody>${rows || '<tr><td colspan="3" style="text-align:center;padding:25px">No registered apps.</td></tr>'}</tbody></table></div></div></div></body></html>`);
+  } catch (err) { console.error("Remote control page error:", err.message); return res.status(500).send("Unable to load remote controls."); }
+});
+
+app.post("/action/app-control", requireLogin, adminActionLimiter, csrfProtection, async (req, res) => {
+  try {
+    const appId = safeString(req.body.appId, MAX_APP_ID_LENGTH);
+    const control = String(req.body.control || "ACTIVE").trim().toUpperCase();
+    const redirectUrl = safeString(req.body.redirectUrl, MAX_URL_LENGTH);
+    const message = safeString(req.body.message, 500);
+    if (!isValidAppId(appId) || !["ACTIVE", "MAINTENANCE", "REDIRECT", "DISABLED", "FORCE_EXIT"].includes(control)) return res.redirect("/controls");
+    if (!(await AppRegistry.exists({ appId }))) return res.redirect("/controls");
+    if (redirectUrl && !isValidHttpUrl(redirectUrl, { requireHttps: IS_PRODUCTION })) return res.redirect("/controls");
+    await AppControl.updateOne({ appId }, { $set: { control, redirectUrl, message, updatedAt: new Date() } }, { upsert: true });
+    if (control === "FORCE_EXIT" || control === "DISABLED") await UsageSession.updateMany({ appId, status: "online" }, { $set: { status: "offline", endReason: "blocked", endTime: new Date(), endTimestamp: Date.now() } });
+  } catch (err) { console.error("Remote control action error:", err.message); }
+  return res.redirect("/controls");
+});
+
+app.get("/api/app-control/:appId", requireApiLogin, async (req, res) => {
+  try {
+    const appId = safeString(req.params.appId, MAX_APP_ID_LENGTH);
+    if (!isValidAppId(appId)) return res.status(400).json({ success: false });
+    return res.json({ success: true, ...(await getAppControl(appId)) });
+  } catch (err) { return res.status(500).json({ success: false }); }
+});
+
+
 app.get("/api/updates", apiLimiter, async (req, res) => {
   try {
     const apks = await Apk.aggregate([

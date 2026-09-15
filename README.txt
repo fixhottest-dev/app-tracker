@@ -1,58 +1,33 @@
-RD Store — Minimal FCM Update Notification Server Patch
+RD FINAL SERVER — FCM + APK REMOTE CONTROL
 
-BASE
-----
-This patch is based directly on the untouched original index (1)(1).js supplied for the RD Store server.
-The existing release/download/security/artifact architecture is preserved.
+Base:
+- Original index (2)(2).js preserved as the authoritative base.
 
-WHAT WAS ADDED
---------------
-1. FCM configuration:
-   FCM_NOTIFICATION_ENABLED=true
-   FCM_SERVICE_ACCOUNT_JSON=<Firebase service-account JSON or base64-JSON>
-   FCM_PROJECT_ID=<optional; service account project_id is used when omitted>
+Preserved:
+- Existing FCM initialization and package-topic update notifications.
+- Existing release/update pipeline.
+- Existing Smart Patch pipeline.
+- Existing Device records and approval system.
+- Existing session timeout/cleanup.
+- Existing security middleware and API behavior.
 
-2. Independent Firebase Admin Messaging initialization.
-   This does NOT require ARTIFACT_STORAGE_MODE=firebase.
-   Existing Firebase Storage behavior is unchanged.
+Added:
+- AppControl per uploaded APK package.
+- Admin page: /controls
+- Admin action: /action/app-control
+- API: /api/app-control/:appId
+- Controls: ACTIVE, MAINTENANCE, REDIRECT, DISABLED, FORCE_EXIT
+- Non-ACTIVE controls close the corresponding online session.
+- Existing RD Store user/device records are not migrated, reset, or deleted.
 
-3. Package-specific FCM topic notifications.
-   Topic format:
-   rdstore_app_<packageName>
+Important:
+- This ZIP contains ONE production server file only: server/index.js
+- Deploy this as your Render index.js.
+- Keep your existing Render environment variables unchanged, including FCM variables.
+- FCM service-account JSON must remain only in Render environment variables; never commit it.
 
-4. Notification is sent only after a release publication transaction succeeds:
-   - automatic release publication
-   - manual artifact publication
-
-5. FCM failure can never convert an already-successful APK publication into a failed release.
-
-ANDROID REQUIREMENT
--------------------
-The RD Store Android app must subscribe to the matching topic after the user has used/downloaded an app from RD Store.
-Example topic for package com.example.app:
-rdstore_app_com.example.app
-
-The Android app should also create the notification channel id:
-rd_store_updates
-
-Notification data contains:
-- type=app_update
-- packageName
-- appName
-- versionName
-- versionCode
-- shareUrl
-
-IMPORTANT
----------
-Do not commit FCM_SERVICE_ACCOUNT_JSON to GitHub.
-Keep the service-account JSON only in Render Environment Variables.
-
-Render variables:
-FCM_NOTIFICATION_ENABLED=true
-FCM_SERVICE_ACCOUNT_JSON=<private JSON value>
-FCM_PROJECT_ID=<optional>
-
-VALIDATION
-----------
-index.js passes `node --check`.
+Validation performed:
+- node --check: PASS
+- FCM helper/call count compared with original: preserved
+- AppControl additions compared with the remote-control version: preserved
+- Diff against original contains only the intended AppControl additions/changes.
