@@ -829,8 +829,36 @@ async function handleTracking(req, res) {
     const appControl = await getAppControl(appId);
 
     if (!device || device.status !== "approved") {
-      await closeOnlineSession(deviceId, appId, device && device.status === "blocked" ? "blocked" : "pending", Date.now());
-      return res.json({ status: "BLOCKED", appId, control: appControl.control, redirectUrl: REDIRECT_URL, controlRedirectUrl: appControl.redirectUrl, message: appControl.message });
+      const deviceStatus = device ? String(device.status || "pending").toLowerCase() : "pending";
+
+      await closeOnlineSession(
+        deviceId,
+        appId,
+        deviceStatus === "blocked" ? "blocked" : "pending",
+        Date.now()
+      );
+
+      // IMPORTANT: pending is not blocked. The Android client must keep
+      // polling so an admin approval can take effect without an app restart.
+      if (deviceStatus === "blocked") {
+        return res.json({
+          status: "BLOCKED",
+          appId,
+          control: appControl.control,
+          redirectUrl: REDIRECT_URL,
+          controlRedirectUrl: appControl.redirectUrl,
+          message: appControl.message
+        });
+      }
+
+      return res.json({
+        status: "PENDING",
+        appId,
+        control: appControl.control,
+        redirectUrl: REDIRECT_URL,
+        controlRedirectUrl: appControl.redirectUrl,
+        message: appControl.message
+      });
     }
 
     const now = Date.now(); const nowDate = new Date(now);
