@@ -34,7 +34,7 @@ const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || "";
 const NODE_ENV = String(process.env.NODE_ENV || "development");
 const IS_PRODUCTION = NODE_ENV === "production";
 const SESSION_SECRET = process.env.SESSION_SECRET || (!IS_PRODUCTION ? crypto.randomBytes(48).toString("hex") : "");
-const REDIRECT_URL = process.env.REDIRECT_URL || "https://wa.me/918099188409?text=Hello%20Developer,%20please%20activate%20my%20app";
+const REDIRECT_URL = String(process.env.REDIRECT_URL || "").trim();
 
 /* ---- Public RD Store share / Android App Links ---- */
 const PUBLIC_SHARE_BASE_URL = String(process.env.PUBLIC_SHARE_BASE_URL || "https://app-tracker-xyp7.onrender.com").trim().replace(/\/+$/, "");
@@ -80,6 +80,12 @@ const ADMIN_SESSION_MAX_AGE = 24 * 60 * 60 * 1000;
 const TRACKING_AUTO_REGISTER_APPS = String(process.env.TRACKING_AUTO_REGISTER_APPS || "true").trim().toLowerCase() === "true";
 const TRACKING_AUTO_REGISTER_NAME = safeString(process.env.TRACKING_AUTO_REGISTER_NAME || "", MAX_APP_NAME_LENGTH);
 const TRACKING_WAKE_PATH = String(process.env.TRACKING_WAKE_PATH || "/wake").trim() || "/wake";
+const TRACKING_APP_IDS = new Set(
+  String(process.env.TRACKING_APP_IDS || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter((x) => x && isValidPackageName(x))
+);
 const DASHBOARD_REFRESH_SECONDS = 15;
 const DEVICES_PER_PAGE = 20;
 
@@ -98,6 +104,16 @@ const WORKER_HEARTBEAT_INTERVAL_MS = Math.max(5000, Number(process.env.WORKER_HE
 const MAX_JOB_ATTEMPTS = Math.max(1, Number(process.env.MAX_JOB_ATTEMPTS || 3));
 const PATCH_USELESS_RATIO = Math.min(1, Math.max(0.1, Number(process.env.PATCH_USELESS_RATIO || 0.9)));
 const WORKER_ID = `${os.hostname()}-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+
+/* ---- Runtime readiness state ----
+   Tracking/dashboard must remain available even if the optional APK release
+   toolchain is temporarily unavailable or MongoDB is reconnecting. */
+let mongoReady = false;
+let mongoInitializationComplete = false;
+let mongoTransactionsReady = false;
+let releaseToolchainReady = false;
+let mongoConnectInFlight = false;
+let mongoRetryTimer = null;
 
 /* ---- Artifact storage modes ----
    manual      = generate + verify locally; admin hosts artifacts externally
@@ -252,9 +268,24 @@ app.get(TRACKING_WAKE_PATH, (req, res) => {
 /* Real health endpoint. Uptime monitoring may use /healthz when database health
    should also be part of the alert condition. */
 app.get("/healthz", (req, res) => {
-  const dbReady = mongoose.connection.readyState === 1;
-  res.status(dbReady ? 200 : 503).json({
+  const dbReady = mongoose.connection.readyState === 1 && mongoReady;
+  /* Process health is deliberately HTTP 200 even while Mongo is reconnecting.
+     /readyz is the strict dependency/readiness endpoint. */
+  return res.status(200).json({
     status: dbReady ? "ok" : "degraded",
+    service: "rd-store-tracker",
+    database: dbReady ? "connected" : "offline",
+    releaseToolchain: releaseToolchainReady ? "ready" : "unavailable",
+    releaseTransactions: mongoTransactionsReady ? "ready" : "unavailable",
+    uptimeSeconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get("/readyz", (req, res) => {
+  const dbReady = mongoose.connection.readyState === 1 && mongoReady;
+  return res.status(dbReady ? 200 : 503).json({
+    status: dbReady ? "ready" : "not_ready",
     service: "rd-store-tracker",
     database: dbReady ? "connected" : "offline",
     timestamp: new Date().toISOString()
@@ -744,7 +775,7 @@ async function assertRegisteredApp(appId) {
      only a syntactically valid Android package name. This removes the old
      first-device/AppRegistry chicken-and-egg failure without granting the
      device approval. */
-  if (TRACKING_AUTO_REGISTER_APPS && isValidPackageName(cleanAppId)) {
+  if (TRACKING_AUTO_REGISTER_APPS && isValidPackageName(cleanAppId) && (TRACKING_APP_IDS.size === 0 || TRACKING_APP_IDS.has(cleanAppId))) {
     const appName = TRACKING_AUTO_REGISTER_NAME || cleanAppId;
     try {
       await AppRegistry.updateOne(
@@ -2002,6 +2033,7 @@ async function processReleaseJob(job) {
     // avoids collection-creation/upsert races on the first release of a package.
     await ensureReleasePackageLock(releaseFields.packageName);
 
+    if (!mongoTransactionsReady) throw new Error("MONGO_TRANSACTIONS_UNAVAILABLE: release publication is temporarily paused.");
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
@@ -2072,6 +2104,8 @@ async function processReleaseJob(job) {
 let releaseWorkerBusy = false;
 async function runReleaseWorkerTick() {
   if (releaseWorkerBusy) return;
+  if (!mongoReady) return;
+  if (!releaseToolchainReady) return;
   if (ARTIFACT_STORAGE_MODE === "firebase" && !firebaseEnabled) return;
   try { assertArtifactStorageReady(); } catch (err) {
     console.error("Artifact storage is not ready; release worker paused:", err.message);
@@ -2740,6 +2774,7 @@ app.post("/action/apk/manual-attach", requireLogin, adminActionLimiter, csrfProt
 
     await ensureReleasePackageLock(job.extractedPackageName);
 
+    if (!mongoTransactionsReady) throw new Error("MONGO_TRANSACTIONS_UNAVAILABLE: release publication is temporarily paused.");
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
@@ -3188,21 +3223,27 @@ let server = null; let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return; shuttingDown = true; console.log(signal + " received. Shutting down...");
   clearInterval(cleanupInterval); clearInterval(releaseWorkerInterval); clearInterval(staleRecoveryInterval);
+  if (mongoRetryTimer) { clearTimeout(mongoRetryTimer); mongoRetryTimer = null; }
   try { if (server) await new Promise((resolve) => server.close(resolve)); await mongoose.disconnect(); console.log("Shutdown complete."); process.exit(0); } catch (err) { console.error("Shutdown error:", err.message); process.exit(1); }
 }
 process.on("SIGTERM", () => shutdown("SIGTERM")); process.on("SIGINT", () => shutdown("SIGINT"));
 
 async function verifyMongoTransactionSupport() {
-  const session = await mongoose.startSession();
+  let session = null;
   try {
+    session = await mongoose.startSession();
     session.startTransaction();
     await session.commitTransaction();
+    mongoTransactionsReady = true;
     console.log("MongoDB transaction capability verified.");
+    return true;
   } catch (err) {
-    try { await session.abortTransaction(); } catch (_) {}
-    throw new Error("MongoDB transactions are required for release publication: " + err.message);
+    mongoTransactionsReady = false;
+    try { if (session) await session.abortTransaction(); } catch (_) {}
+    console.error("MongoDB transactions are unavailable; release publication is paused:", err.message);
+    return false;
   } finally {
-    await session.endSession();
+    if (session) await session.endSession().catch(() => {});
   }
 }
 
@@ -3229,57 +3270,132 @@ async function verifyReleaseToolchain() {
       }
     }
   }
-  if (failures.length) throw new Error("Release toolchain is incomplete: " + failures.join(" | "));
+  if (failures.length) {
+    releaseToolchainReady = false;
+    console.error("Release toolchain is incomplete; release worker is paused:", failures.join(" | "));
+    return false;
+  }
+  releaseToolchainReady = true;
+  return true;
 }
 
-async function startServer() {
+async function initializeMongoRuntime() {
+  if (mongoInitializationComplete || mongoose.connection.readyState !== 1) return;
   try {
-    await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 10000, socketTimeoutMS: 45000 });
+    await Device.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
+    await UsageSession.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
 
-    try {
-      assertArtifactStorageReady();
-      console.log("Artifact storage ready: " + storageModeLabel());
-    } catch (storageErr) {
-      console.error("Artifact storage is not ready; release worker will remain paused:", storageErr.message);
+    const distinctAppIds = await Device.distinct("appId");
+    const configuredAppIds = Array.from(TRACKING_APP_IDS);
+    const appIdsToRegister = Array.from(new Set([...distinctAppIds, ...configuredAppIds]));
+    for (const appId of appIdsToRegister) {
+      if (!appId) continue;
+      await AppRegistry.updateOne(
+        { appId },
+        { $setOnInsert: { appId, appName: TRACKING_AUTO_REGISTER_NAME || appId } },
+        { upsert: true }
+      ).catch((err) => console.error("App registry backfill error:", err.message));
     }
-    await verifyMongoTransactionSupport();
 
-    try {
-      await Device.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
-      await UsageSession.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
-      const distinctAppIds = await Device.distinct("appId");
-      const configuredAppIds = String(process.env.TRACKING_APP_IDS || "").split(",").map((x) => x.trim()).filter((x) => x && isValidPackageName(x));
-      const appIdsToRegister = Array.from(new Set([...distinctAppIds, ...configuredAppIds]));
-      for (const appId of appIdsToRegister) {
-        if (!appId) continue;
-        await AppRegistry.updateOne({ appId }, { $setOnInsert: { appId, appName: TRACKING_AUTO_REGISTER_NAME || appId } }, { upsert: true }).catch((err) => console.error("App registry backfill error:", err.message));
-      }
-    } catch (err) { console.error("App registry startup backfill error (non-fatal):", err.message); }
-    
-    try { 
-      await Device.syncIndexes(); 
-      await UsageSession.syncIndexes(); 
-      await Apk.syncIndexes(); 
-      await AppRegistry.syncIndexes(); 
-      await ReleaseJob.syncIndexes();
-      await ReleasePackageLock.syncIndexes();
-    } catch (err) {
-      console.error("FATAL: MongoDB index synchronization failed:", err);
-      process.exit(1);
-    }
+    await Device.syncIndexes();
+    await UsageSession.syncIndexes();
+    await Apk.syncIndexes();
+    await AppRegistry.syncIndexes();
+    await ReleaseJob.syncIndexes();
+    await ReleasePackageLock.syncIndexes();
 
     await ensureTempDir();
     await verifyReleaseToolchain();
+    await verifyMongoTransactionSupport();
 
     await reconcileOrphanedPublications();
     await recoverStaleJobs();
+    mongoInitializationComplete = true;
+    console.log("MongoDB runtime initialization complete.");
+  } catch (err) {
+    mongoInitializationComplete = false;
+    releaseToolchainReady = false;
+    mongoTransactionsReady = false;
+    console.error("MongoDB runtime initialization failed (tracking remains available):", err.stack || err.message || err);
+    if (!mongoRetryTimer && !shuttingDown) {
+      mongoRetryTimer = setTimeout(() => {
+        mongoRetryTimer = null;
+        initializeMongoRuntime().catch((retryErr) => console.error("MongoDB runtime retry error:", retryErr.message));
+      }, 30000);
+      mongoRetryTimer.unref();
+    }
+  }
+}
 
+async function connectMongoWithRetry() {
+  if (mongoConnectInFlight || mongoReady) return;
+  mongoConnectInFlight = true;
+  try {
+    await mongoose.connect(MONGO_URI, {
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10,
+      minPoolSize: 0
+    });
+    mongoReady = mongoose.connection.readyState === 1;
+    if (mongoReady) {
+      console.log("MongoDB connected.");
+      await initializeMongoRuntime();
+    }
+  } catch (err) {
+    mongoReady = false;
+    mongoInitializationComplete = false;
+    releaseToolchainReady = false;
+    mongoTransactionsReady = false;
+    console.error("MongoDB connection failed; retrying without taking down the web server:", err.message);
+    try { await mongoose.disconnect(); } catch (_) {}
+  } finally {
+    mongoConnectInFlight = false;
+    if (!mongoReady && !mongoRetryTimer && !shuttingDown) {
+      mongoRetryTimer = setTimeout(() => {
+        mongoRetryTimer = null;
+        connectMongoWithRetry().catch((err) => console.error("Mongo retry error:", err.message));
+      }, 15000);
+      mongoRetryTimer.unref();
+    }
+  }
+}
+
+mongoose.connection.on("connected", () => {
+  mongoReady = true;
+  console.log("MongoDB connection state: connected");
+});
+mongoose.connection.on("disconnected", () => {
+  mongoReady = false;
+  mongoInitializationComplete = false;
+  releaseToolchainReady = false;
+  mongoTransactionsReady = false;
+  console.warn("MongoDB connection state: disconnected; tracking requests will return DATABASE_OFFLINE until reconnect.");
+  if (!mongoRetryTimer && !mongoConnectInFlight && !shuttingDown) {
+    mongoRetryTimer = setTimeout(() => {
+      mongoRetryTimer = null;
+      connectMongoWithRetry().catch((err) => console.error("Mongo reconnect error:", err.message));
+    }, 15000);
+    mongoRetryTimer.unref();
+  }
+});
+mongoose.connection.on("error", (err) => {
+  console.error("MongoDB connection error:", err.message);
+});
+
+async function startServer() {
+  try {
+    /* Bind immediately. Render/UptimeRobot can therefore reach /wake and
+       /healthz while MongoDB or the release toolchain is reconnecting. */
     server = app.listen(PORT, () => {
       console.log("V8.3.2 Ultimate Render Production Edition running on port " + PORT + " (artifact storage mode: " + storageModeLabel() + ")");
+      console.log("Tracking endpoint: /index.php and /track; wake endpoint: " + TRACKING_WAKE_PATH + "; readiness endpoint: /readyz");
     });
-  } catch (err) { 
-    console.error("Server startup failed:", err);
-    process.exit(1); 
+
+    await connectMongoWithRetry();
+  } catch (err) {
+    console.error("Server startup failed:", err.stack || err.message || err);
+    process.exit(1);
   }
 }
 
