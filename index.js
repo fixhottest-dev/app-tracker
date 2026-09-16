@@ -59,6 +59,18 @@ if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(RDSTORE_SHARE_PACK
 const ONLINE_TIMEOUT_MS = Math.max(10000, Number(process.env.ONLINE_TIMEOUT_MS || 45000));
 const CLEANUP_INTERVAL_MS = Math.max(5000, Number(process.env.CLEANUP_INTERVAL_MS || 15000));
 
+const MAX_DEVICE_ID_LENGTH = 200;
+const MAX_NICKNAME_LENGTH = 50;
+const MAX_SEARCH_LENGTH = 100;
+const MAX_APP_ID_LENGTH = 200;
+const MAX_APP_NAME_LENGTH = 100;
+const MAX_DESCRIPTION_LENGTH = 500;
+const MAX_VERSION_NAME_LENGTH = 50;
+const MAX_PACKAGE_LENGTH = 200;
+const MAX_URL_LENGTH = 500;
+const MAX_HASH_LENGTH = 64;
+const ADMIN_SESSION_MAX_AGE = 24 * 60 * 60 * 1000;
+
 /* ---- Tracking availability / Render wake configuration ----
    Tracking clients already send Context.getPackageName() as appId.
    When enabled, a valid Android package is automatically inserted into
@@ -71,17 +83,6 @@ const TRACKING_WAKE_PATH = String(process.env.TRACKING_WAKE_PATH || "/wake").tri
 const DASHBOARD_REFRESH_SECONDS = 15;
 const DEVICES_PER_PAGE = 20;
 
-const MAX_DEVICE_ID_LENGTH = 200;
-const MAX_NICKNAME_LENGTH = 50;
-const MAX_SEARCH_LENGTH = 100;
-const MAX_APP_ID_LENGTH = 200;
-const MAX_APP_NAME_LENGTH = 100;
-const MAX_DESCRIPTION_LENGTH = 500;
-const MAX_VERSION_NAME_LENGTH = 50;
-const MAX_PACKAGE_LENGTH = 200;
-const MAX_URL_LENGTH = 500;
-const MAX_HASH_LENGTH = 64;
-const ADMIN_SESSION_MAX_AGE = 24 * 60 * 60 * 1000;
 
 /* ---- APK release pipeline configuration ---- */
 const APK_MAX_SIZE_BYTES = Math.max(1024 * 1024, Number(process.env.APK_MAX_SIZE_BYTES || 400 * 1024 * 1024));
