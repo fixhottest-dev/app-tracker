@@ -58,6 +58,16 @@ if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(RDSTORE_SHARE_PACK
 
 const ONLINE_TIMEOUT_MS = Math.max(10000, Number(process.env.ONLINE_TIMEOUT_MS || 45000));
 const CLEANUP_INTERVAL_MS = Math.max(5000, Number(process.env.CLEANUP_INTERVAL_MS || 15000));
+
+/* ---- Tracking availability / Render wake configuration ----
+   Tracking clients already send Context.getPackageName() as appId.
+   When enabled, a valid Android package is automatically inserted into
+   AppRegistry on first contact, so a new APK build does not require a
+   manual registry entry before its first device can be recorded. Device
+   approval remains separate and is still required for ALLOWED sessions. */
+const TRACKING_AUTO_REGISTER_APPS = String(process.env.TRACKING_AUTO_REGISTER_APPS || "true").trim().toLowerCase() === "true";
+const TRACKING_AUTO_REGISTER_NAME = safeString(process.env.TRACKING_AUTO_REGISTER_NAME || "", MAX_APP_NAME_LENGTH);
+const TRACKING_WAKE_PATH = String(process.env.TRACKING_WAKE_PATH || "/wake").trim() || "/wake";
 const DASHBOARD_REFRESH_SECONDS = 15;
 const DEVICES_PER_PAGE = 20;
 
@@ -226,9 +236,28 @@ else if (TRUST_PROXY === "true") {
   process.exit(1);
 }
 app.disable("x-powered-by");
+
+/* Lightweight Render wake endpoint. It intentionally does not require MongoDB:
+   an external monitor can hit this URL to wake the web service even while the
+   database connection is still coming up. */
+app.get(TRACKING_WAKE_PATH, (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    service: "rd-store-tracker",
+    timestamp: new Date().toISOString()
+  });
+});
+
+/* Real health endpoint. Uptime monitoring may use /healthz when database health
+   should also be part of the alert condition. */
 app.get("/healthz", (req, res) => {
   const dbReady = mongoose.connection.readyState === 1;
-  res.status(dbReady ? 200 : 503).json({ status: dbReady ? "ok" : "degraded" });
+  res.status(dbReady ? 200 : 503).json({
+    status: dbReady ? "ok" : "degraded",
+    service: "rd-store-tracker",
+    database: dbReady ? "connected" : "offline",
+    timestamp: new Date().toISOString()
+  });
 });
 app.use(express.urlencoded({ extended: true, limit: "100kb" }));
 app.use(express.json({ limit: "100kb" }));
@@ -706,13 +735,32 @@ const cleanupInterval = setInterval(markStaleSessionsOffline, CLEANUP_INTERVAL_M
 cleanupInterval.unref();
 
 async function assertRegisteredApp(appId) {
-  const registry = await AppRegistry.findOne({ appId }).select({ _id: 1 }).lean();
-  if (!registry) {
-    const err = new Error("APP_NOT_REGISTERED");
-    err.code = "APP_NOT_REGISTERED";
-    throw err;
+  const cleanAppId = safeString(appId, MAX_APP_ID_LENGTH);
+  const registry = await AppRegistry.findOne({ appId: cleanAppId }).select({ _id: 1 }).lean();
+  if (registry) return true;
+
+  /* The Android client supplies Context.getPackageName(). Automatically create
+     only a syntactically valid Android package name. This removes the old
+     first-device/AppRegistry chicken-and-egg failure without granting the
+     device approval. */
+  if (TRACKING_AUTO_REGISTER_APPS && isValidPackageName(cleanAppId)) {
+    const appName = TRACKING_AUTO_REGISTER_NAME || cleanAppId;
+    try {
+      await AppRegistry.updateOne(
+        { appId: cleanAppId },
+        { $setOnInsert: { appId: cleanAppId, appName, createdAt: new Date() } },
+        { upsert: true }
+      );
+      return true;
+    } catch (err) {
+      if (err && err.code === 11000) return true;
+      console.error("Automatic app registration failed:", cleanAppId, err.message);
+    }
   }
-  return true;
+
+  const err = new Error("APP_NOT_REGISTERED");
+  err.code = "APP_NOT_REGISTERED";
+  throw err;
 }
 
 async function getAppControl(appId) {
@@ -750,24 +798,24 @@ async function handleTracking(req, res) {
 
     if (!device || device.status !== "approved") {
       await closeOnlineSession(deviceId, appId, device && device.status === "blocked" ? "blocked" : "pending", Date.now());
-      return res.json({ status: "BLOCKED", control: appControl.control, redirectUrl: REDIRECT_URL, controlRedirectUrl: appControl.redirectUrl, message: appControl.message });
+      return res.json({ status: "BLOCKED", appId, control: appControl.control, redirectUrl: REDIRECT_URL, controlRedirectUrl: appControl.redirectUrl, message: appControl.message });
     }
 
     const now = Date.now(); const nowDate = new Date(now);
     if (action === "stop") {
       const stopped = await closeOnlineSession(deviceId, appId, "stop", now);
-      return res.json({ status: "ALLOWED", control: appControl.control, action: stopped ? "STOPPED" : "NO_ACTIVE_SESSION" });
+      return res.json({ status: "ALLOWED", appId, control: appControl.control, action: stopped ? "STOPPED" : "NO_ACTIVE_SESSION" });
     }
 
     if (appControl.control !== "ACTIVE") {
       await closeOnlineSession(deviceId, appId, appControl.control === "FORCE_EXIT" || appControl.control === "DISABLED" ? "blocked" : "stop", now);
-      return res.json({ status: "CONTROL", control: appControl.control, redirectUrl: appControl.redirectUrl, message: appControl.message });
+      return res.json({ status: "CONTROL", appId, control: appControl.control, redirectUrl: appControl.redirectUrl, message: appControl.message });
     }
 
     let activeSession = await UsageSession.findOne({ deviceId, appId, status: "online" });
     if (activeSession) {
       activeSession.lastSeenTime = nowDate; activeSession.lastSeenTimestamp = now; await activeSession.save();
-      return res.json({ status: "ALLOWED", control: appControl.control, action: "HEARTBEAT" });
+      return res.json({ status: "ALLOWED", appId, control: appControl.control, action: "HEARTBEAT" });
     }
 
     try { activeSession = await UsageSession.create({ deviceId, appId, startTime: nowDate, lastSeenTime: nowDate, startTimestamp: now, lastSeenTimestamp: now, status: "online" }); }
@@ -775,7 +823,7 @@ async function handleTracking(req, res) {
       if (err && err.code === 11000) { activeSession = await UsageSession.findOneAndUpdate({ deviceId, appId, status: "online" }, { $set: { lastSeenTime: nowDate, lastSeenTimestamp: now } }, { new: true }); } else { throw err; }
     }
 
-    return res.json({ status: "ALLOWED", control: appControl.control, action: "STARTED", sessionId: activeSession ? String(activeSession._id) : null });
+    return res.json({ status: "ALLOWED", appId, control: appControl.control, action: "STARTED", sessionId: activeSession ? String(activeSession._id) : null });
   } catch (err) {
     if (err && err.code === "APP_NOT_REGISTERED") return res.status(404).json({ status: "ERROR", message: "APP_NOT_REGISTERED" });
     console.error("Tracking error:", err.message);
@@ -3199,8 +3247,13 @@ async function startServer() {
       await Device.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
       await UsageSession.updateMany({ appId: { $exists: false } }, { $set: { appId: "default_app" } });
       const distinctAppIds = await Device.distinct("appId");
-      for (const appId of distinctAppIds) { if (!appId) continue; await AppRegistry.updateOne({ appId }, { $setOnInsert: { appId, appName: appId } }, { upsert: true }).catch((err) => console.error("App registry backfill error:", err.message)); }
-    } catch (err) {}
+      const configuredAppIds = String(process.env.TRACKING_APP_IDS || "").split(",").map((x) => x.trim()).filter((x) => x && isValidPackageName(x));
+      const appIdsToRegister = Array.from(new Set([...distinctAppIds, ...configuredAppIds]));
+      for (const appId of appIdsToRegister) {
+        if (!appId) continue;
+        await AppRegistry.updateOne({ appId }, { $setOnInsert: { appId, appName: TRACKING_AUTO_REGISTER_NAME || appId } }, { upsert: true }).catch((err) => console.error("App registry backfill error:", err.message));
+      }
+    } catch (err) { console.error("App registry startup backfill error (non-fatal):", err.message); }
     
     try { 
       await Device.syncIndexes(); 
