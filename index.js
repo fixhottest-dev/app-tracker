@@ -828,34 +828,64 @@ async function handleTracking(req, res) {
 
     const appControl = await getAppControl(appId);
 
+    /* Device state and global app control are separate state machines.
+       Never report a pending device as BLOCKED: the Android client must keep
+       polling so an administrator approval can take effect without an app restart.
+       Global FORCE_EXIT/REDIRECT/DISABLED/MAINTENANCE controls remain explicit. */
     if (!device || device.status !== "approved") {
       const deviceStatus = device ? String(device.status || "pending").toLowerCase() : "pending";
 
-      await closeOnlineSession(
-        deviceId,
-        appId,
-        deviceStatus === "blocked" ? "blocked" : "pending",
-        Date.now()
-      );
+      if (appControl.control === "FORCE_EXIT") {
+        await closeOnlineSession(deviceId, appId, "blocked", Date.now());
+        return res.json({
+          status: "CONTROL",
+          appId,
+          control: "FORCE_EXIT",
+          redirectUrl: appControl.redirectUrl,
+          message: appControl.message
+        });
+      }
 
-      // IMPORTANT: pending is not blocked. The Android client must keep
-      // polling so an admin approval can take effect without an app restart.
+      if (appControl.control === "REDIRECT") {
+        await closeOnlineSession(deviceId, appId, "stop", Date.now());
+        return res.json({
+          status: "CONTROL",
+          appId,
+          control: "REDIRECT",
+          redirectUrl: appControl.redirectUrl,
+          message: appControl.message
+        });
+      }
+
+      if (appControl.control === "MAINTENANCE" || appControl.control === "DISABLED") {
+        await closeOnlineSession(deviceId, appId, "stop", Date.now());
+        return res.json({
+          status: "CONTROL",
+          appId,
+          control: appControl.control,
+          redirectUrl: appControl.redirectUrl,
+          message: appControl.message
+        });
+      }
+
       if (deviceStatus === "blocked") {
+        await closeOnlineSession(deviceId, appId, "blocked", Date.now());
         return res.json({
           status: "BLOCKED",
           appId,
-          control: appControl.control,
+          control: "ACTIVE",
           redirectUrl: REDIRECT_URL,
           controlRedirectUrl: appControl.redirectUrl,
           message: appControl.message
         });
       }
 
+      await closeOnlineSession(deviceId, appId, "pending", Date.now());
       return res.json({
         status: "PENDING",
         appId,
-        control: appControl.control,
-        redirectUrl: REDIRECT_URL,
+        control: "ACTIVE",
+        redirectUrl: "",
         controlRedirectUrl: appControl.redirectUrl,
         message: appControl.message
       });
