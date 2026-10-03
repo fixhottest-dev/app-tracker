@@ -403,7 +403,8 @@ class ReleaseSecurityError extends Error {
 
 /* ---- FCM helpers ---- */
 function getFcmTopicForPackage(packageName) {
-  const pkg = String(packageName || "").trim();
+  // 🔥 FIX 1: .toLowerCase() add kiya taaki Android client ki subscription se exact match ho
+  const pkg = String(packageName || "").trim().toLowerCase();
   if (!isValidAppId(pkg) || pkg.length > MAX_PACKAGE_LENGTH) return null;
   const topic = "rdstore_app_" + pkg;
   return topic.length <= 900 ? topic : null;
@@ -414,13 +415,14 @@ async function sendUpdateNotification(packageName, appName, versionName, version
   const topic = getFcmTopicForPackage(packageName);
   if (!topic) return { sent: false, skipped: true, reason: "PACKAGE_INVALID" };
   try {
-    const title = `${String(appName || packageName).trim() || packageName} update available`;
     const versionLabel = String(versionName || "").trim();
-    const body = versionLabel ? `Version ${versionLabel} is now available.` : "A new version is now available.";
     const shareUrl = `${PUBLIC_SHARE_ORIGIN}/app/${encodeURIComponent(packageName)}`;
+    
+    // 🔥 FIX 2: "notification" block ko hata diya. 
+    // Ab ye 100% "Data-Only" message ban gaya hai. 
+    // Ye Android ko force karega ki app background mein hone par bhi aapka RDStoreMessagingService trigger ho.
     const messageId = await fcmMessaging.send({
       topic,
-      notification: { title, body },
       data: {
         type: "app_update",
         packageName: String(packageName),
@@ -430,11 +432,7 @@ async function sendUpdateNotification(packageName, appName, versionName, version
         shareUrl
       },
       android: {
-        priority: "high",
-        notification: {
-          channelId: "rd_store_updates",
-          clickAction: "RD_STORE_APP_UPDATE"
-        }
+        priority: "high"
       }
     });
     console.log(`FCM update notification sent: ${packageName} v${versionLabel || versionCode} topic=${topic} messageId=${messageId}`);
@@ -444,6 +442,7 @@ async function sendUpdateNotification(packageName, appName, versionName, version
     return { sent: false, skipped: false, error: err.message };
   }
 }
+
 
 /* =========================================================
    SCHEMAS
